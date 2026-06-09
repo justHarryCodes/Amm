@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "migrate": "tsx lib/db/migrate.ts",
-    "postinstall": "patch-package || true"
+    "postinstall": "echo 'install complete'"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.1.3",
