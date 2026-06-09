@@ -9,11 +9,10 @@ import { useSSE } from '@/hooks/useSSE';
 import { WalletPanel } from './WalletPanel';
 
 const NAV = [
-  { href: '/',          label: 'Home',     icon: LayoutDashboard },
-  { href: '/peg',       label: 'Peg',      icon: Activity },
-  { href: '/bulk',      label: 'BNB',      icon: Send },
-  { href: '/solana',    label: 'Solana',   icon: Coins },
-  { href: '/settings',  label: 'Settings', icon: Settings },
+  { href: '/',       label: 'Home',   icon: LayoutDashboard },
+  { href: '/peg',    label: 'Peg',    icon: Activity },
+  { href: '/bulk',   label: 'BNB',    icon: Send },
+  { href: '/solana', label: 'Solana', icon: Coins },
 ];
 
 export default function Navbar() {
@@ -28,7 +27,7 @@ export default function Navbar() {
         setTestnet(s.evmNetwork === 'testnet' || s.solanaNetwork === 'devnet');
       })
       .catch(() => {});
-  }, [path]); // re-check whenever navigation occurs
+  }, [path]);
 
   return (
     <>
@@ -59,6 +58,13 @@ export default function Navbar() {
             <span className={clsx('h-1.5 w-1.5 rounded-full', connected ? 'bg-brand-400' : 'bg-zinc-600')} />
             {connected ? 'Live' : 'Offline'}
           </span>
+          <Link href="/settings"
+            className={clsx(
+              'p-2 rounded-lg transition-colors',
+              path === '/settings' ? 'bg-brand-500/10 text-brand-400' : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+            )}>
+            <Settings className="h-4 w-4" />
+          </Link>
           <button onClick={() => setWalletOpen(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors">
             <Wallet className="h-4 w-4 text-brand-400" />Wallet
@@ -72,7 +78,19 @@ export default function Navbar() {
           <Zap className="h-5 w-5 text-brand-400" />PegBot
         </div>
         <div className="flex items-center gap-2">
+          {testnet && (
+            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+              TESTNET
+            </span>
+          )}
           <span className={clsx('h-1.5 w-1.5 rounded-full', connected ? 'bg-brand-400' : 'bg-zinc-600')} />
+          <Link href="/settings"
+            className={clsx(
+              'p-2 rounded-lg transition-colors',
+              path === '/settings' ? 'text-brand-400' : 'text-zinc-400'
+            )}>
+            <Settings className="h-4 w-4" />
+          </Link>
           <button onClick={() => setWalletOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium bg-zinc-800 text-zinc-200">
             <Wallet className="h-4 w-4 text-brand-400" />Wallet
@@ -80,7 +98,7 @@ export default function Navbar() {
         </div>
       </header>
 
-      {/* ── Mobile bottom tab bar ───────────────────────── */}
+      {/* ── Mobile bottom tab bar (no Wallet, no Settings) ── */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-zinc-900/95 backdrop-blur-xl border-t border-zinc-800 flex">
         {NAV.map(({ href, label, icon: Icon }) => (
           <Link key={href} href={href}
@@ -91,10 +109,6 @@ export default function Navbar() {
             <Icon className="h-5 w-5" />{label}
           </Link>
         ))}
-        <button onClick={() => setWalletOpen(true)}
-          className="flex flex-col items-center justify-center gap-1 flex-1 py-3 text-xs font-medium text-zinc-500">
-          <Wallet className="h-5 w-5" />Wallet
-        </button>
       </nav>
 
       <WalletPanel open={walletOpen} onClose={() => setWalletOpen(false)} />
