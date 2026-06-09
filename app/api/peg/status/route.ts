@@ -10,7 +10,9 @@ export async function GET() {
   try {
     const snap = priceMonitor.getLastSnapshot();
     const { chain, targetPeg, upperBand, lowerBand } = pegMaintainer.settings;
-    const stats = await pegMaintainer.getDailyStats();
+    const stats = await pegMaintainer.getDailyStats().catch(() => ({
+      totalTrades: 0, totalBuyUsd: 0, totalSellTokens: 0,
+    }));
 
     // Describe which token/pair addresses are active for this chain
     const chainCfg = chain === 'bsc'

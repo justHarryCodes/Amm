@@ -73,10 +73,13 @@ export default function PegPage() {
   const { on } = useSSE();
 
   const refresh = useCallback(async () => {
-    try {
-      const [s, cfg, t] = await Promise.all([getPegStatus(), getPegConfig(), getTradeHistory(20)]);
-      setStatus(s); setSettings(cfg); setTrades(t);
-    } catch { /* ignore */ }
+    // Fetch independently — a DB failure on status/trades must not hide the config form
+    const [s, cfg, t] = await Promise.allSettled([
+      getPegStatus(), getPegConfig(), getTradeHistory(20),
+    ]);
+    if (cfg.status === 'fulfilled') setSettings(cfg.value as PegSettings);
+    if (s.status   === 'fulfilled') setStatus(s.value as PegStatus);
+    if (t.status   === 'fulfilled') setTrades(t.value as Trade[]);
     setLoading(false);
   }, []);
 

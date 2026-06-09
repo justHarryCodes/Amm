@@ -9,10 +9,14 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  // EventSource can't send custom headers — use query param for auth
-  const key = req.nextUrl.searchParams.get('key');
-  if (key !== config.apiSecret) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+  // Only enforce auth when a non-default API_SECRET is configured.
+  // EventSource can't send custom headers so the key travels as a query param.
+  const usingCustomSecret = config.apiSecret !== 'dev-secret';
+  if (usingCustomSecret) {
+    const key = req.nextUrl.searchParams.get('key');
+    if (key !== config.apiSecret) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+    }
   }
 
   const encoder = new TextEncoder();
