@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/USER/.claude/projects/c--Users-USER-Desktop-liquidity2/memory/**)",
+      "Bash(mkdir -p c:/Users/USER/Desktop/liquidity2/lib/abi && cp c:/Users/USER/Desktop/liquidity2/backend/src/abi/*.json c:/Users/USER/Desktop/liquidity2/lib/abi/ && echo \"done\")",
+      "Bash(node -e \"const l = require\\('lucide-react'\\); console.log\\(l.CircleDot ? 'CircleDot OK' : 'MISSING'\\)\")",
+      "Bash(Test-Path \"c:/Users/USER/Desktop/liquidity2/node_modules\")",
+      "Bash(npx tsc *)",
+      "Bash(./node_modules/.bin/tsc --noEmit)",
+      "PowerShell($pkg = Get-Content \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\\\\node_modules\\\\viem\\\\package.json\" | ConvertFrom-Json; Write-Output \"types: $\\($pkg.types\\)\"; Write-Output \"main: $\\($pkg.main\\)\"; $pkg.exports | ConvertTo-Json -Depth 2 | Select-Object -First 20)",
+      "Bash(node generate-keys.js)",
+      "Bash(node -e \"console.log\\(require\\('crypto'\\).randomBytes\\(32\\).toString\\('hex'\\)\\)\")",
+      "Bash(Remove-Item \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\\\\backend\\\\generate-keys.js\")",
+      "Bash(npx tsx *)",
+      "Bash(node -e \"const https = require\\('https'\\); https.get\\('https://cloudflare.com', r => console.log\\('HTTP OK:', r.statusCode\\)\\).on\\('error', e => console.log\\('No net:', e.message\\)\\);\")",
+      "Bash(node -e \"const https = require\\('https'\\); const req = https.get\\('https://cloudflare.com', r => { console.log\\('HTTP OK:', r.statusCode\\); process.exit\\(0\\); }\\); req.on\\('error', e => { console.log\\('No net:', e.message\\); process.exit\\(1\\); }\\); setTimeout\\(\\(\\) => { console.log\\('timeout'\\); process.exit\\(1\\); }, 5000\\);\")",
+      "Bash(node -e ' *)",
+      "Bash(DATABASE_URL=\"postgres://postgres:CmYet14rhVefy4ex5qpSSTTO0VW2ktFb9FTW6e798V99BrB2AhyNOQlM9ZZwSgDF@31.97.58.198:5433/postgres\" npx tsx lib/db/migrate.ts)",
+      "Bash(npm show *)",
+      "Bash(npx next *)",
+      "Bash(Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue)",
+      "Bash(Select-String -Pattern \"berachain|Error|warning|error\")",
+      "Bash(node -e \"try { require\\('papaparse'\\); console.log\\('papaparse installed:', require\\('papaparse/package.json'\\).version\\); } catch\\(e\\) { console.log\\('papaparse MISSING'\\); }\")",
+      "Bash(Get-ChildItem -Force)",
+      "Bash(Select-Object -Property Mode, Name, LastWriteTime)",
+      "PowerShell(cd \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\"; $manifest = Get-Content \".next\\\\server\\\\middleware-manifest.json\" | ConvertFrom-Json; Write-Host \"version:\" $manifest.version; Write-Host \"middleware keys:\" \\($manifest.middleware.PSObject.Properties.Name -join \", \"\\); Write-Host \"files type:\" $manifest.middleware.'/'.files.GetType\\(\\).Name)",
+      "PowerShell(cd \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\"; $job = Start-Job -ScriptBlock { Set-Location \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\"; npm run start 2>&1 }; Start-Sleep -Seconds 5; Receive-Job $job; Stop-Job $job; Remove-Job $job)",
+      "PowerShell($proc = Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if \\($proc\\) { Stop-Process -Id $proc -Force; Write-Host \"Killed PID $proc on port 3000\" } else { Write-Host \"Nothing on port 3000\" })",
+      "PowerShell(cd \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\"; $job = Start-Job -ScriptBlock { Set-Location \"c:\\\\Users\\\\USER\\\\Desktop\\\\liquidity2\"; npm run start 2>&1 }; Start-Sleep -Seconds 6; $out = Receive-Job $job; Stop-Job $job; Remove-Job $job; $out)",
+      "Bash(node -e \"const p = require\\('./node_modules/bigint-buffer/package.json'\\); console.log\\('version:', p.version\\); console.log\\('name:', p.name\\);\")",
+      "Bash(ls node_modules/bigint-buffer/build/Release/)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); deps={**d.get\\('dependencies',{}\\),**d.get\\('devDependencies',{}\\)}; [print\\(k,v\\) for k,v in deps.items\\(\\) if 'solana' in k.lower\\(\\) or 'raydium' in k.lower\\(\\) or 'spl' in k.lower\\(\\) or 'metaplex' in k.lower\\(\\)]\")",
+      "Bash(node -e \"const p=require\\('./package.json'\\); const all={...p.dependencies,...p.devDependencies}; Object.keys\\(all\\).filter\\(k=>k.includes\\('solana'\\)||k.includes\\('raydium'\\)||k.includes\\('spl'\\)\\).forEach\\(k=>console.log\\(k,all[k]\\)\\)\")",
+      "Bash(node -e \"require\\('@raydium-io/raydium-sdk-v2'\\); console.log\\('ok'\\)\")",
+      "Bash(node -e \"const r=require\\('@raydium-io/raydium-sdk-v2'\\); console.log\\(Object.keys\\(r\\).filter\\(k=>k.includes\\('CPMM'\\)||k.includes\\('cpmm'\\)||k.includes\\('CREATE'\\)\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node -e \"const r=require\\('@raydium-io/raydium-sdk-v2'\\); console.log\\(Object.keys\\(r\\).filter\\(k=>k.includes\\('Raydium'\\)||k.includes\\('load'\\)\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node -e \"const {Raydium}=require\\('@raydium-io/raydium-sdk-v2'\\); console.log\\(Object.keys\\(Raydium\\)\\)\")",
+      "Bash(node -e \"const {Raydium}=require\\('@raydium-io/raydium-sdk-v2'\\); const r=new Raydium\\({}\\); console.log\\(Object.keys\\(r\\)\\)\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\USER\\Desktop\\liquidity2\\backend\\src\\abi",
+      "c:\\Users\\USER\\.claude\\projects\\c--Users-USER-Desktop-liquidity2\\memory"
+    ]
+  }
+}
