@@ -30,7 +30,6 @@ import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { CHAIN_TOKENS } from '@/lib/tokens';
 
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? '';
 
 const ERC20_DECIMALS_ABI = [
   {
@@ -192,7 +191,7 @@ function EvmSection({ botInfo }: { botInfo: BotBalances | null }) {
     try {
       const res = await fetch('/api/wallet/withdraw/evm', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           chain: activeChain,
           asset: withdrawAsset === 'native' ? 'native' : withdrawToken,
@@ -476,7 +475,7 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
     try {
       const res = await fetch('/api/wallet/withdraw/solana', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           asset: withdrawAsset === 'sol' ? 'sol' : withdrawMint,
           amount: withdrawAmount,
@@ -638,9 +637,7 @@ export function WalletPanel({ open, onClose }: WalletPanelProps) {
 
   const fetchBotInfo = useCallback(async () => {
     try {
-      const res = await fetch('/api/wallet/bot-balances', {
-        headers: { 'x-api-key': API_KEY },
-      });
+      const res = await fetch('/api/wallet/bot-balances');
       if (res.ok) setBotInfo(await res.json());
     } catch { /* non-fatal */ }
   }, []);

@@ -21,10 +21,8 @@ export function useSSE() {
     let timer: ReturnType<typeof setTimeout>;
 
     function connect() {
-      const key = typeof window !== 'undefined'
-        ? (localStorage.getItem('api_key') ?? process.env.NEXT_PUBLIC_API_KEY ?? '')
-        : '';
-      es = new EventSource(`/api/events?key=${encodeURIComponent(key)}`);
+      // Session cookie is sent automatically — no key param needed
+      es = new EventSource('/api/events');
 
       es.onopen  = () => setConnected(true);
       es.onerror = () => {

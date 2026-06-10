@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { getAppSettings } from '@/lib/api';
-import { LayoutDashboard, Activity, Send, Coins, Wallet, Zap, Settings } from 'lucide-react';
+import { LayoutDashboard, Activity, Send, Coins, Wallet, Zap, Settings, LogOut } from 'lucide-react';
 import clsx from 'clsx';
 import { useSSE } from '@/hooks/useSSE';
 import { WalletPanel } from './WalletPanel';
@@ -14,6 +14,11 @@ const NAV = [
   { href: '/bulk',   label: 'BNB',    icon: Send },
   { href: '/solana', label: 'Solana', icon: Coins },
 ];
+
+async function logout() {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  window.location.href = '/login';
+}
 
 export default function Navbar() {
   const path = usePathname();
@@ -68,6 +73,10 @@ export default function Navbar() {
           <button onClick={() => setWalletOpen(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors">
             <Wallet className="h-4 w-4 text-brand-400" />Wallet
+          </button>
+          <button onClick={logout} title="Logout"
+            className="p-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors">
+            <LogOut className="h-4 w-4" />
           </button>
         </div>
       </header>

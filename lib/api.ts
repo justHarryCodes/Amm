@@ -3,13 +3,8 @@ import axios from 'axios';
 // Relative URLs — works in the browser and on the same Next.js origin
 export const api = axios.create({ baseURL: '' });
 
-api.interceptors.request.use(cfg => {
-  if (typeof window !== 'undefined') {
-    const key = localStorage.getItem('api_key') ?? process.env.NEXT_PUBLIC_API_KEY ?? '';
-    if (key) cfg.headers['x-api-key'] = key;
-  }
-  return cfg;
-});
+// Session cookie is set by /api/auth/login and sent automatically by the browser.
+// No API key injection needed — the httpOnly cookie handles browser auth.
 
 // Extract the server's { error: "..." } body so callers see the real message, not "status 500".
 api.interceptors.response.use(
