@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import {
   getPegStatus, getPegConfig, updatePegConfig,
   startBot, stopBot, pauseBot, resumeBot, getTradeHistory,
-  findPegPair, initPool,
+  findPegPair, initPool, approvePegTokens,
 } from '@/lib/api';
 import { useSSE } from '@/hooks/useSSE';
 import {
@@ -12,6 +12,7 @@ import {
   Clock, ExternalLink, ChevronDown, ChevronUp, Search, Droplets,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { CHAIN_TOKENS } from '@/lib/tokens';
 
 type PegChain = 'bsc' | 'ethereum' | 'solana';
 
@@ -38,7 +39,11 @@ const EXPLORER: Record<PegChain, (tx: string) => string> = {
 };
 
 const DEX_NAME: Record<PegChain, string> = {
-  bsc: 'PancakeSwap V2', ethereum: 'Uniswap V2', solana: 'Raydium CPMM',
+  bsc: CHAIN_TOKENS.bsc.dex, ethereum: CHAIN_TOKENS.ethereum.dex, solana: CHAIN_TOKENS.solana.dex,
+};
+
+const DEFAULT_ROUTERS: Record<PegChain, string> = {
+  bsc: CHAIN_TOKENS.bsc.router, ethereum: CHAIN_TOKENS.ethereum.router, solana: '',
 };
 
 const STATE_DOT: Record<string, string> = {
@@ -50,12 +55,6 @@ const STATE_DOT: Record<string, string> = {
 
 const CHAIN_COLORS: Record<PegChain, string> = {
   bsc: 'badge-yellow', ethereum: 'badge-blue', solana: 'badge-purple',
-};
-
-const DEFAULT_ROUTERS: Record<PegChain, string> = {
-  bsc:      '0x10ED43C718714eb63d5aA57B78B54704E256024E',
-  ethereum: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
-  solana:   '',
 };
 
 export default function PegPage() {
@@ -177,9 +176,7 @@ export default function PegPage() {
         {/* Controls */}
         {missingConfig && state === 'STOPPED' && (
           <div className="mb-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
-            {!settings?.tokenAddress || !settings?.stableAddress
-              ? 'Set token & stablecoin addresses in Setup before starting.'
-              : 'Set a pair address in Setup (or use Pool Liquidity → Find Existing Pair) before starting.'}
+            Complete the setup steps below before starting.
           </div>
         )}
         <div className="flex gap-2">
@@ -234,7 +231,17 @@ export default function PegPage() {
         )}
       </div>
 
-      {/* ── 2. SETUP (accordion) ──────────────────────── */}
+      {/* ── 2. SETUP GUIDE — shown when stopped & incomplete ── */}
+      {settings && state === 'STOPPED' && (
+        <SetupGuide
+          settings={settings}
+          chain={chain}
+          onOpenSetup={() => setSetupOpen(true)}
+          onOpenPool={() => setPoolOpen(true)}
+        />
+      )}
+
+      {/* ── 3. SETUP (accordion) ──────────────────────── */}
       {settings && (
         <div className="card">
           <button onClick={() => setSetupOpen(v => !v)}
@@ -268,7 +275,7 @@ export default function PegPage() {
         </div>
       )}
 
-      {/* ── 3. POOL LIQUIDITY (accordion) ────────────── */}
+      {/* ── 4. POOL LIQUIDITY (accordion) ────────────── */}
       {settings && (
         <div className="card">
           <button onClick={() => setPoolOpen(v => !v)}
@@ -302,7 +309,7 @@ export default function PegPage() {
         </div>
       )}
 
-      {/* ── 4. RECENT ACTIVITY ───────────────────────── */}
+      {/* ── 5. RECENT ACTIVITY ───────────────────────── */}
       <div className="card">
         <p className="font-semibold text-zinc-100 text-sm mb-3">Recent Activity</p>
         {loading ? (
@@ -343,6 +350,158 @@ export default function PegPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Setup guide ───────────────────────────────────────────────────────────────
+
+interface GuideStep {
+  n: number;
+  label: string;
+  done: boolean;
+  cta?: React.ReactNode;
+  note?: React.ReactNode;
+}
+
+function SetupGuide({
+  settings, chain, onOpenSetup, onOpenPool,
+}: {
+  settings: PegSettings;
+  chain: PegChain;
+  onOpenSetup: () => void;
+  onOpenPool: () => void;
+}) {
+  const [approving, setApproving]   = useState(false);
+  const [approveResult, setResult]  = useState<'idle' | 'done' | 'already'>('idle');
+
+  const isEvm        = chain === 'bsc' || chain === 'ethereum';
+  const hasAddresses = !!(settings.tokenAddress && settings.stableAddress);
+  const hasPair      = !!(settings.pairAddress);
+  const isApproved   = approveResult === 'done' || approveResult === 'already';
+
+  async function handleApprove() {
+    setApproving(true);
+    try {
+      const res = await approvePegTokens();
+      setResult(res.alreadyApproved ? 'already' : 'done');
+      toast.success(res.alreadyApproved ? 'Already approved — ready to trade' : 'Tokens approved for the router');
+    } catch (e: unknown) {
+      toast.error((e as Error).message ?? 'Approval failed');
+    }
+    setApproving(false);
+  }
+
+  const evmSteps: GuideStep[] = [
+    {
+      n: 1,
+      label: 'Open Setup and enter your token address + choose a stablecoin (USDC, USDT, or WBNB/WETH)',
+      done: hasAddresses,
+      cta: !hasAddresses && (
+        <button onClick={onOpenSetup} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
+          Open Setup ↑
+        </button>
+      ),
+    },
+    {
+      n: 2,
+      label: 'Open Pool Liquidity — find an existing pair or create a new one to seed initial liquidity',
+      done: hasPair,
+      cta: hasAddresses && !hasPair && (
+        <button onClick={onOpenPool} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
+          Open Pool Liquidity ↓
+        </button>
+      ),
+    },
+    {
+      n: 3,
+      label: 'Approve your token and stablecoin so the router can trade on the bot\'s behalf',
+      done: isApproved,
+      cta: hasPair && !isApproved && (
+        <button
+          onClick={handleApprove}
+          disabled={approving}
+          className="mt-1.5 btn-ghost text-xs px-3 py-1.5 disabled:opacity-40"
+        >
+          {approving ? 'Approving…' : 'Approve Tokens'}
+        </button>
+      ),
+      note: isApproved && (
+        <span className="text-xs text-brand-400 mt-1 block">
+          {approveResult === 'already' ? 'Already approved' : 'Approval confirmed ✓'}
+        </span>
+      ),
+    },
+    {
+      n: 4,
+      label: 'Start the bot in Monitor Only (watch prices, no trades) or Auto Trade mode',
+      done: false,
+    },
+  ];
+
+  const solanaSteps: GuideStep[] = [
+    {
+      n: 1,
+      label: 'Open Setup and enter your token mint address + choose a stablecoin (USDC, USDT, or wSOL)',
+      done: hasAddresses,
+      cta: !hasAddresses && (
+        <button onClick={onOpenSetup} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
+          Open Setup ↑
+        </button>
+      ),
+    },
+    {
+      n: 2,
+      label: 'Open Pool Liquidity — find an existing Raydium pool or create one with initial liquidity',
+      done: hasPair,
+      cta: hasAddresses && !hasPair && (
+        <button onClick={onOpenPool} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
+          Open Pool Liquidity ↓
+        </button>
+      ),
+    },
+    {
+      n: 3,
+      label: 'Start the bot — Jupiter will route all trades through your Raydium pool automatically',
+      done: false,
+    },
+  ];
+
+  const steps = isEvm ? evmSteps : solanaSteps;
+  const allDoneExceptLast = steps.slice(0, -1).every(s => s.done);
+
+  return (
+    <div className="card">
+      <p className="font-semibold text-zinc-100 text-sm mb-4">Getting Started</p>
+      <ol className="space-y-4">
+        {steps.map((step) => (
+          <li key={step.n} className="flex gap-3">
+            <span className={clsx(
+              'flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold mt-0.5',
+              step.done
+                ? 'bg-brand-500 text-white'
+                : allDoneExceptLast && step.n === steps.length
+                  ? 'bg-amber-500/20 border border-amber-500 text-amber-400'
+                  : 'bg-zinc-800 text-zinc-500'
+            )}>
+              {step.done ? '✓' : step.n}
+            </span>
+            <div>
+              <p className={clsx('text-sm leading-snug', step.done ? 'text-zinc-500 line-through' : 'text-zinc-200')}>
+                {step.label}
+              </p>
+              {'cta' in step && step.cta}
+              {'note' in step && step.note}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {!isEvm && (
+        <p className="mt-4 text-xs text-zinc-600">
+          Solana: no approval step needed — SPL token transfers use associated token accounts (ATAs) managed automatically.
+        </p>
+      )}
     </div>
   );
 }
@@ -407,28 +566,30 @@ function SetupForm({
         <div>
           <label className="block text-xs text-zinc-400 mb-1.5">
             {s.chain === 'solana' ? 'Stable Mint' : 'Stablecoin Contract'}
+            <span className="text-zinc-600 ml-1">— any token supported</span>
           </label>
-          {s.chain === 'solana' ? (
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                {[['USDC', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'],
-                  ['USDT', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']].map(([l, m]) => (
-                  <button key={l} type="button" onClick={() => setS(p => ({ ...p, stableAddress: m }))}
-                    className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
-                      s.stableAddress === m
-                        ? 'border-brand-500 bg-brand-500/10 text-brand-400'
-                        : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
-                    {l}
-                  </button>
-                ))}
-              </div>
-              <input className="input font-mono text-xs" placeholder="EPjF…"
-                value={s.stableAddress} onChange={str('stableAddress')} />
+          <div className="space-y-2">
+            {/* Quick-select: USDC, USDT, wrapped native for all chains */}
+            <div className="flex gap-2 flex-wrap">
+              {([
+                ['USDC', CHAIN_TOKENS[s.chain].usdc.address],
+                ['USDT', CHAIN_TOKENS[s.chain].usdt.address],
+                [CHAIN_TOKENS[s.chain].wNative.symbol, CHAIN_TOKENS[s.chain].wNative.address],
+              ] as [string, string][]).map(([label, addr]) => (
+                <button key={label} type="button"
+                  onClick={() => setS(p => ({ ...p, stableAddress: addr }))}
+                  className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                    s.stableAddress === addr
+                      ? 'border-brand-500 bg-brand-500/10 text-brand-400'
+                      : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
+                  {label}
+                </button>
+              ))}
             </div>
-          ) : (
-            <input className="input font-mono text-xs" placeholder="0x…"
+            <input className="input font-mono text-xs"
+              placeholder={s.chain === 'solana' ? 'Any mint address…' : 'Any token address (0x…)'}
               value={s.stableAddress} onChange={str('stableAddress')} />
-          )}
+          </div>
         </div>
 
         {isEvm && (
@@ -553,15 +714,26 @@ function PoolSection({
       </div>
 
       {/* DEX info badge */}
-      <div className="surface flex items-center justify-between">
+      <div className="surface grid grid-cols-3 gap-3">
         <div className="text-xs">
           <p className="text-zinc-500">DEX</p>
           <p className="text-zinc-200 font-medium mt-0.5">{DEX_NAME[chain]}</p>
         </div>
+        <div className="text-xs">
+          <p className="text-zinc-500">Router</p>
+          {chain === 'solana' ? (
+            <p className="text-zinc-500 mt-0.5 italic">Jupiter-routed</p>
+          ) : (
+            <p className="font-mono text-zinc-400 mt-0.5 truncate"
+               title={CHAIN_TOKENS[chain].router}>
+              {CHAIN_TOKENS[chain].router.slice(0, 10)}…
+            </p>
+          )}
+        </div>
         <div className="text-xs text-right">
           <p className="text-zinc-500">Pool / Pair</p>
           {poolId && poolId !== 'FOUND_VIA_JUPITER' ? (
-            <p className="font-mono text-brand-400 mt-0.5">{poolId.slice(0, 12)}…</p>
+            <p className="font-mono text-brand-400 mt-0.5">{poolId.slice(0, 10)}…</p>
           ) : (
             <p className="text-amber-400 mt-0.5">{poolId === 'FOUND_VIA_JUPITER' ? '✓ Found' : 'Not set'}</p>
           )}

@@ -28,6 +28,7 @@ import {
 import { X, Wallet, ArrowDownToLine, ArrowUpFromLine, Copy, Check } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
+import { CHAIN_TOKENS } from '@/lib/tokens';
 
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? '';
 
@@ -63,6 +64,10 @@ interface BotBalances {
     stableBalance: string;
     tokenAddress: string;
     stableAddress: string;
+    bscUsdc: string;
+    bscUsdt: string;
+    ethUsdc: string;
+    ethUsdt: string;
   };
   solana?: {
     address: string;
@@ -71,6 +76,8 @@ interface BotBalances {
     stableBalance: string;
     tokenMint: string;
     stableMint: string;
+    usdcBalance: string;
+    usdtBalance: string;
   };
   errors: Record<string, string>;
 }
@@ -224,12 +231,17 @@ function EvmSection({ botInfo }: { botInfo: BotBalances | null }) {
             <CopyButton text={botInfo.evm.address} />
           </div>
           <div className="grid grid-cols-2 gap-2">
-            {[
+            {([
               ['BSC (BNB)', parseFloat(botInfo.evm.bsc).toFixed(4)],
               ['Ethereum (ETH)', parseFloat(botInfo.evm.ethereum).toFixed(4)],
               ...(botInfo.evm.tokenAddress ? [['Peg Token', parseFloat(botInfo.evm.tokenBalance).toFixed(4)]] : []),
               ...(botInfo.evm.stableAddress ? [['Stablecoin', parseFloat(botInfo.evm.stableBalance).toFixed(4)]] : []),
-            ].map(([label, value]) => (
+              // USDC/USDT shown for the active chain
+              [`USDC (${activeChain === 'bsc' ? 'BSC' : 'ETH'})`,
+                parseFloat(activeChain === 'bsc' ? botInfo.evm.bscUsdc : botInfo.evm.ethUsdc).toFixed(2)],
+              [`USDT (${activeChain === 'bsc' ? 'BSC' : 'ETH'})`,
+                parseFloat(activeChain === 'bsc' ? botInfo.evm.bscUsdt : botInfo.evm.ethUsdt).toFixed(2)],
+            ] as [string, string][]).map(([label, value]) => (
               <div key={label} className="surface">
                 <p className="text-xs text-zinc-600">{label}</p>
                 <p className="text-sm font-mono text-zinc-100 mt-0.5">{value}</p>
@@ -374,8 +386,9 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
 
   const botAddress = botInfo?.solana?.address ?? '';
 
-  const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-  const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+  const USDC = CHAIN_TOKENS.solana.usdc.address;
+  const USDT = CHAIN_TOKENS.solana.usdt.address;
+  const WSOL = CHAIN_TOKENS.solana.wNative.address;
 
   async function handleFundSol() {
     if (!publicKey || !botAddress) return;
@@ -501,11 +514,13 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
             <CopyButton text={botInfo.solana.address} />
           </div>
           <div className="grid grid-cols-2 gap-2">
-            {[
+            {([
               ['SOL Balance', botInfo.solana.sol + ' SOL'],
               ...(botInfo.solana.tokenMint ? [['Peg Token', parseFloat(botInfo.solana.tokenBalance).toFixed(4)]] : []),
               ...(botInfo.solana.stableMint ? [['Stablecoin', parseFloat(botInfo.solana.stableBalance).toFixed(4)]] : []),
-            ].map(([label, value]) => (
+              ['USDC', parseFloat(botInfo.solana.usdcBalance).toFixed(2)],
+              ['USDT', parseFloat(botInfo.solana.usdtBalance).toFixed(2)],
+            ] as [string, string][]).map(([label, value]) => (
               <div key={label} className="surface">
                 <p className="text-xs text-zinc-600">{label}</p>
                 <p className="text-sm font-mono text-zinc-100 mt-0.5">{value}</p>
@@ -535,7 +550,7 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
           {fundAsset === 'spl' && (
             <div className="space-y-2">
               <div className="flex gap-1.5 flex-wrap">
-                {[['USDC', USDC], ['USDT', USDT]].map(([l, m]) => (
+                {[['USDC', USDC], ['USDT', USDT], ['wSOL', WSOL]].map(([l, m]) => (
                   <button key={l} onClick={() => setFundMint(m)}
                     className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">{l}</button>
                 ))}
@@ -579,7 +594,7 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
         {withdrawAsset === 'spl' && (
           <div className="space-y-2">
             <div className="flex gap-1.5 flex-wrap">
-              {[['USDC', USDC], ['USDT', USDT]].map(([l, m]) => (
+              {[['USDC', USDC], ['USDT', USDT], ['wSOL', WSOL]].map(([l, m]) => (
                 <button key={l} onClick={() => setWithdrawMint(m)}
                   className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">{l}</button>
               ))}

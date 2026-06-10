@@ -13,6 +13,7 @@ import { PublicKey } from '@solana/web3.js';
 import ROUTER_ABI  from '../abi/PancakeV2Router.json';
 import FACTORY_ABI from '../abi/PancakeV2Factory.json';
 import ERC20_ABI   from '../abi/ERC20.json';
+import { txOverrides } from '../blockchain/contracts';
 
 export type BotState = 'STOPPED' | 'MONITOR_ONLY' | 'AUTO_TRADE' | 'PAUSED';
 
@@ -259,7 +260,7 @@ class PegMaintainer extends EventEmitter {
       const minOut  = (out * BigInt(Math.floor((1 - slippage) * 10000))) / 10000n;
       const tok = new ethers.Contract(tokenAddress, erc20Full, signer);
       if ((await tok.allowance(signer.address, routerAddress)) < amtIn) {
-        const t = await tok.approve(routerAddress, ethers.MaxUint256); await t.wait();
+        const t = await tok.approve(routerAddress, ethers.MaxUint256, await txOverrides(chain)); await t.wait();
       }
       tx = await router.swapExactTokensForTokens(
         amtIn, minOut, [tokenAddress, stableAddress],
@@ -274,7 +275,7 @@ class PegMaintainer extends EventEmitter {
       const minOut  = (out * BigInt(Math.floor((1 - slippage) * 10000))) / 10000n;
       const stb = new ethers.Contract(stableAddress, erc20Full, signer);
       if ((await stb.allowance(signer.address, routerAddress)) < amtIn) {
-        const t = await stb.approve(routerAddress, ethers.MaxUint256); await t.wait();
+        const t = await stb.approve(routerAddress, ethers.MaxUint256, await txOverrides(chain)); await t.wait();
       }
       tx = await router.swapExactTokensForTokens(
         amtIn, minOut, [stableAddress, tokenAddress],

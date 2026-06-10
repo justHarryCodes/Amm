@@ -6,6 +6,7 @@ import { getSolanaConnection, getSolanaKeypair } from '@/lib/solana/connection';
 import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import { getMint, getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 import { pegMaintainer } from '@/lib/services/pegMaintainer';
+import { CHAIN_TOKENS } from '@/lib/tokens';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -68,6 +69,10 @@ export async function GET() {
       stableBalance: string;
       tokenAddress: string;
       stableAddress: string;
+      bscUsdc: string;
+      bscUsdt: string;
+      ethUsdc: string;
+      ethUsdt: string;
     };
     solana?: {
       address: string;
@@ -76,6 +81,8 @@ export async function GET() {
       stableBalance: string;
       tokenMint: string;
       stableMint: string;
+      usdcBalance: string;
+      usdtBalance: string;
     };
     errors: Record<string, string>;
   } = { errors: {} };
@@ -83,13 +90,25 @@ export async function GET() {
   // EVM balances
   try {
     const signer = getChainSigner('bsc');
-    const evmProvider = getChainProvider(isEvm ? chain : 'bsc');
+    const bscProvider = getChainProvider('bsc');
+    const ethProvider = getChainProvider('ethereum');
+    const activeEvmProvider = getChainProvider(isEvm ? chain : 'bsc');
 
-    const [bscBal, ethBal, tokenBal, stableBal] = await Promise.all([
-      getChainProvider('bsc').getBalance(signer.address),
-      getChainProvider('ethereum').getBalance(signer.address),
-      isEvm ? getErc20Balance(signer.address, tokenAddress, evmProvider) : Promise.resolve('0'),
-      isEvm ? getErc20Balance(signer.address, stableAddress, evmProvider) : Promise.resolve('0'),
+    const [
+      bscBal, ethBal,
+      tokenBal, stableBal,
+      bscUsdc, bscUsdt,
+      ethUsdc, ethUsdt,
+    ] = await Promise.all([
+      bscProvider.getBalance(signer.address),
+      ethProvider.getBalance(signer.address),
+      isEvm ? getErc20Balance(signer.address, tokenAddress, activeEvmProvider) : Promise.resolve('0'),
+      isEvm ? getErc20Balance(signer.address, stableAddress, activeEvmProvider) : Promise.resolve('0'),
+      // Always fetch USDC/USDT for both chains regardless of peg config
+      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdc.address, bscProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdt.address, bscProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdc.address, ethProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdt.address, ethProvider),
     ]);
 
     result.evm = {
@@ -100,23 +119,27 @@ export async function GET() {
       stableBalance: stableBal,
       tokenAddress: isEvm ? tokenAddress : '',
       stableAddress: isEvm ? stableAddress : '',
+      bscUsdc,
+      bscUsdt,
+      ethUsdc,
+      ethUsdt,
     };
   } catch (e: unknown) {
     result.errors.evm = (e as Error).message;
   }
 
-  // Solana balance
+  // Solana balances
   try {
     const keypair = getSolanaKeypair();
     const conn = getSolanaConnection();
     const lamports = await conn.getBalance(keypair.publicKey, 'confirmed');
 
-    const [tokenBal, stableBal] = chain === 'solana'
-      ? await Promise.all([
-          getSplBalance(conn, keypair.publicKey, tokenAddress),
-          getSplBalance(conn, keypair.publicKey, stableAddress),
-        ])
-      : ['0', '0'];
+    const [tokenBal, stableBal, usdcBalance, usdtBalance] = await Promise.all([
+      chain === 'solana' ? getSplBalance(conn, keypair.publicKey, tokenAddress) : Promise.resolve('0'),
+      chain === 'solana' ? getSplBalance(conn, keypair.publicKey, stableAddress) : Promise.resolve('0'),
+      getSplBalance(conn, keypair.publicKey, CHAIN_TOKENS.solana.usdc.address),
+      getSplBalance(conn, keypair.publicKey, CHAIN_TOKENS.solana.usdt.address),
+    ]);
 
     result.solana = {
       address: keypair.publicKey.toBase58(),
@@ -125,6 +148,8 @@ export async function GET() {
       stableBalance: stableBal,
       tokenMint: chain === 'solana' ? tokenAddress : '',
       stableMint: chain === 'solana' ? stableAddress : '',
+      usdcBalance,
+      usdtBalance,
     };
   } catch (e: unknown) {
     result.errors.solana = (e as Error).message;
