@@ -25,7 +25,7 @@ import {
   getAssociatedTokenAddressSync,
   getMint,
 } from '@solana/spl-token';
-import { X, Wallet, ArrowDownToLine, ArrowUpFromLine, Copy, Check } from 'lucide-react';
+import { X, Wallet, ArrowDownToLine, ArrowUpFromLine, Copy, Check, Loader2, AlertCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { CHAIN_TOKENS } from '@/lib/tokens';
@@ -634,12 +634,25 @@ interface WalletPanelProps {
 export function WalletPanel({ open, onClose }: WalletPanelProps) {
   const [tab, setTab] = useState<'evm' | 'solana'>('evm');
   const [botInfo, setBotInfo] = useState<BotBalances | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState('');
 
   const fetchBotInfo = useCallback(async () => {
+    setLoading(true);
+    setFetchError('');
     try {
       const res = await fetch('/api/wallet/bot-balances');
-      if (res.ok) setBotInfo(await res.json());
-    } catch { /* non-fatal */ }
+      if (res.ok) {
+        setBotInfo(await res.json() as BotBalances);
+      } else {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        setFetchError(`Error ${res.status}: ${body.error ?? 'Failed to load balances'}`);
+      }
+    } catch (e: unknown) {
+      setFetchError((e as Error).message ?? 'Network error');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -673,9 +686,10 @@ export function WalletPanel({ open, onClose }: WalletPanelProps) {
             <h2 className="font-semibold text-zinc-100">Wallets &amp; Balances</h2>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={fetchBotInfo} className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors">
-              Refresh
-            </button>
+            {loading
+              ? <Loader2 className="h-4 w-4 text-zinc-500 animate-spin" />
+              : <button onClick={fetchBotInfo} className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors">Refresh</button>
+            }
             <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors">
               <X className="h-5 w-5" />
             </button>
@@ -696,11 +710,30 @@ export function WalletPanel({ open, onClose }: WalletPanelProps) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {tab === 'evm' ? (
-            <EvmSection botInfo={botInfo} />
-          ) : (
-            <SolanaSection botInfo={botInfo} />
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* Fetch-level error (auth failure, network down, etc.) */}
+          {fetchError && (
+            <div className="flex items-start gap-2 rounded-xl bg-red-500/10 border border-red-500/20 px-3 py-2.5">
+              <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-red-400">{fetchError}</p>
+            </div>
+          )}
+
+          {/* Loading skeleton while first fetch runs */}
+          {loading && !botInfo && (
+            <div className="space-y-3 animate-pulse">
+              <div className="h-24 rounded-xl bg-zinc-800/60" />
+              <div className="h-32 rounded-xl bg-zinc-800/60" />
+              <div className="h-20 rounded-xl bg-zinc-800/60" />
+            </div>
+          )}
+
+          {(!loading || botInfo) && (
+            tab === 'evm' ? (
+              <EvmSection botInfo={botInfo} />
+            ) : (
+              <SolanaSection botInfo={botInfo} />
+            )
           )}
         </div>
       </div>
