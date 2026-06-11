@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ethers } from 'ethers';
-import { getChainSigner, getGasPrice } from '@/lib/blockchain/provider';
+import { getChainSigner } from '@/lib/blockchain/provider';
+import { txOverrides } from '@/lib/blockchain/contracts';
 
 const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
@@ -33,11 +34,11 @@ export async function POST(req: NextRequest) {
 
   try {
     const signer = getChainSigner(chain);
-    const gasPrice = await getGasPrice(chain);
+    const gas = await txOverrides(chain);
 
     if (asset === 'native') {
       const value = ethers.parseEther(amount);
-      const tx = await signer.sendTransaction({ to: toAddress, value, gasPrice });
+      const tx = await signer.sendTransaction({ to: toAddress, value, ...gas });
       await tx.wait();
       return NextResponse.json({ txHash: tx.hash, chain, asset: 'native', amount, toAddress });
     }
@@ -50,7 +51,7 @@ export async function POST(req: NextRequest) {
     const decimals = Number(await token.decimals());
     const rawAmount = ethers.parseUnits(amount, decimals);
 
-    const tx = await token.transfer(toAddress, rawAmount, { gasPrice });
+    const tx = await token.transfer(toAddress, rawAmount, gas);
     await tx.wait();
     return NextResponse.json({ txHash: tx.hash, chain, asset, amount, toAddress });
   } catch (e: unknown) {
