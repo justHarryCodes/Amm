@@ -13,7 +13,7 @@ import { PublicKey } from '@solana/web3.js';
 import ROUTER_ABI  from '../abi/PancakeV2Router.json';
 import FACTORY_ABI from '../abi/PancakeV2Factory.json';
 import ERC20_ABI   from '../abi/ERC20.json';
-import { txOverrides } from '../blockchain/contracts';
+import { txOverrides, ensureApproval } from '../blockchain/contracts';
 
 export type BotState = 'STOPPED' | 'MONITOR_ONLY' | 'AUTO_TRADE' | 'PAUSED';
 
@@ -403,9 +403,7 @@ class PegMaintainer extends EventEmitter {
 
     if (pairAddress === ethers.ZeroAddress) {
       logger.info('Pair does not exist — creating', { chain, tokenAddress, stableAddress });
-      const createTx = await factory.createPair(tokenAddress, stableAddress, {
-        gasPrice: await getGasPrice(chain),
-      });
+      const createTx = await factory.createPair(tokenAddress, stableAddress, await txOverrides(chain));
       await createTx.wait();
       createTxHash = createTx.hash;
       pairAddress = await factory.getPair(tokenAddress, stableAddress);
@@ -415,45 +413,33 @@ class PegMaintainer extends EventEmitter {
       logger.info('Pair created', { pairAddress, createTxHash });
     }
 
-    const erc20Abi = [
-      'function decimals() view returns (uint8)',
-      'function approve(address,uint256) returns (bool)',
-      'function allowance(address,address) view returns (uint256)',
-    ];
+    const decAbi = ['function decimals() view returns (uint8)'];
     const provider = signer.provider!;
     const [tokenDec, stableDec] = await Promise.all([
-      Number(await new ethers.Contract(tokenAddress,  erc20Abi, provider).decimals()),
-      Number(await new ethers.Contract(stableAddress, erc20Abi, provider).decimals()),
+      Number(await new ethers.Contract(tokenAddress,  decAbi, provider).decimals()),
+      Number(await new ethers.Contract(stableAddress, decAbi, provider).decimals()),
     ]);
 
     const tokenRaw  = ethers.parseUnits(tokenAmount.toFixed(tokenDec),   tokenDec);
     const stableRaw = ethers.parseUnits(stableAmount.toFixed(stableDec), stableDec);
 
-    const tokenContract  = new ethers.Contract(tokenAddress,  erc20Abi, signer);
-    const stableContract = new ethers.Contract(stableAddress, erc20Abi, signer);
+    // Approve both tokens — sequential so BSC nonce doesn't collide.
+    // ensureApproval uses txOverrides() which sets type:0 on BSC (required).
+    await ensureApproval(tokenAddress,  routerAddress, tokenRaw,  chain);
+    await ensureApproval(stableAddress, routerAddress, stableRaw, chain);
 
-    const [tokAllow, stbAllow] = await Promise.all([
-      tokenContract.allowance(signer.address, routerAddress),
-      stableContract.allowance(signer.address, routerAddress),
-    ]);
-    if (BigInt(tokAllow) < tokenRaw) {
-      const t = await tokenContract.approve(routerAddress, ethers.MaxUint256); await t.wait();
-    }
-    if (BigInt(stbAllow) < stableRaw) {
-      const t = await stableContract.approve(routerAddress, ethers.MaxUint256); await t.wait();
-    }
-
-    // 5% slippage floor for initial liquidity — first LP so no price impact risk
+    // 5% slippage floor for initial liquidity
     const minToken  = (tokenRaw  * 95n) / 100n;
     const minStable = (stableRaw * 95n) / 100n;
     const deadline  = Math.floor(Date.now() / 1000) + 600;
 
+    const gas = await txOverrides(chain);
     const liquidityTx = await router.addLiquidity(
       tokenAddress, stableAddress,
       tokenRaw, stableRaw,
       minToken, minStable,
       signer.address, deadline,
-      { gasPrice: await getGasPrice(chain) }
+      gas
     );
     await liquidityTx.wait();
 
