@@ -431,6 +431,30 @@ class PegMaintainer extends EventEmitter {
     const tokenRaw  = ethers.parseUnits(tokenAmount.toFixed(tokenDec),   tokenDec);
     const stableRaw = ethers.parseUnits(stableAmount.toFixed(stableDec), stableDec);
 
+    // ── Pre-flight: verify bot wallet has sufficient balance ──────────────────
+    const balAbi = [
+      'function balanceOf(address) view returns (uint256)',
+      'function symbol() view returns (string)',
+    ];
+    const [tokenBal, stableBal, tokenSym, stableSym] = await Promise.all([
+      new ethers.Contract(tokenAddress,  balAbi, provider).balanceOf(signer.address) as Promise<bigint>,
+      new ethers.Contract(stableAddress, balAbi, provider).balanceOf(signer.address) as Promise<bigint>,
+      (new ethers.Contract(tokenAddress,  balAbi, provider).symbol() as Promise<string>).catch(() => 'TOKEN'),
+      (new ethers.Contract(stableAddress, balAbi, provider).symbol() as Promise<string>).catch(() => 'STABLE'),
+    ]);
+    if (tokenBal < tokenRaw) {
+      throw new Error(
+        `Insufficient ${tokenSym}: bot has ${ethers.formatUnits(tokenBal, tokenDec)} but needs ${tokenAmount}. ` +
+        `Send ${tokenSym} to bot wallet: ${signer.address}`
+      );
+    }
+    if (stableBal < stableRaw) {
+      throw new Error(
+        `Insufficient ${stableSym}: bot has ${ethers.formatUnits(stableBal, stableDec)} but needs ${stableAmount}. ` +
+        `Send ${stableSym} to bot wallet: ${signer.address}`
+      );
+    }
+
     // Approve both tokens — sequential so BSC nonce doesn't collide.
     // ensureApproval uses txOverrides() which sets type:0 on BSC (required).
     await ensureApproval(tokenAddress,  routerAddress, tokenRaw,  chain);
