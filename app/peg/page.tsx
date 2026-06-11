@@ -380,21 +380,27 @@ function SetupCard({
   const [s, setS]           = useState(settings);
   const [limitsOpen, setLimitsOpen] = useState(false);
   const [approving, setApproving]   = useState(false);
+  const dirty = useRef(false);
 
-  // Sync if parent settings change (e.g. after chain switch from pool section)
-  useEffect(() => { setS(settings); }, [settings]);
+  // Only sync from parent when user hasn't made unsaved edits
+  useEffect(() => { if (!dirty.current) setS(settings); }, [settings]);
 
   const { info: tokenInfo, checking } = useTokenBalance(s.tokenAddress, s.chain);
   const hasNoTokenBalance = tokenInfo && parseFloat(tokenInfo.balance) === 0;
 
   const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
 
-  const str = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) =>
+  const str = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    dirty.current = true;
     setS(p => ({ ...p, [k]: e.target.value }));
-  const num = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) =>
+  };
+  const num = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    dirty.current = true;
     setS(p => ({ ...p, [k]: parseFloat(e.target.value) || 0 }));
+  };
 
   function switchChain(c: PegChain) {
+    dirty.current = false;
     setS(p => ({
       ...p, chain: c,
       tokenAddress: '', pairAddress: '',
@@ -421,7 +427,7 @@ function SetupCard({
   ] as [string, string][];
 
   return (
-    <form onSubmit={e => { e.preventDefault(); onSave(s); }} className="card space-y-4">
+    <form onSubmit={e => { e.preventDefault(); dirty.current = false; onSave(s); }} className="card space-y-4">
       <p className="font-semibold text-zinc-100 text-sm">Setup</p>
 
       {/* Chain */}
