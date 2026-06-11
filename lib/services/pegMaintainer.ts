@@ -455,10 +455,14 @@ class PegMaintainer extends EventEmitter {
       );
     }
 
-    // Approve both tokens — sequential so BSC nonce doesn't collide.
-    // ensureApproval uses txOverrides() which sets type:0 on BSC (required).
-    await ensureApproval(tokenAddress,  routerAddress, tokenRaw,  chain);
-    await ensureApproval(stableAddress, routerAddress, stableRaw, chain);
+    // Unconditional MaxUint256 approval for both tokens — sequential so BSC nonce doesn't collide.
+    // Always send fresh approvals; never skip based on existing allowance.
+    const approveAbi = ['function approve(address,uint256) returns (bool)'];
+    const approveGas = await txOverrides(chain);
+    const approveTx1 = await new ethers.Contract(tokenAddress,  approveAbi, signer).approve(routerAddress, ethers.MaxUint256, approveGas);
+    await approveTx1.wait();
+    const approveTx2 = await new ethers.Contract(stableAddress, approveAbi, signer).approve(routerAddress, ethers.MaxUint256, approveGas);
+    await approveTx2.wait();
 
     // 5% slippage floor for initial liquidity
     const minToken  = (tokenRaw  * 95n) / 100n;
