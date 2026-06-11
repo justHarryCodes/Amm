@@ -455,14 +455,26 @@ class PegMaintainer extends EventEmitter {
       );
     }
 
-    // Unconditional MaxUint256 approval for both tokens — sequential so BSC nonce doesn't collide.
-    // Always send fresh approvals; never skip based on existing allowance.
-    const approveAbi = ['function approve(address,uint256) returns (bool)'];
-    const approveGas = await txOverrides(chain);
-    const approveTx1 = await new ethers.Contract(tokenAddress,  approveAbi, signer).approve(routerAddress, ethers.MaxUint256, approveGas);
-    await approveTx1.wait();
-    const approveTx2 = await new ethers.Contract(stableAddress, approveAbi, signer).approve(routerAddress, ethers.MaxUint256, approveGas);
-    await approveTx2.wait();
+    // ── Allowance guard ───────────────────────────────────────────────────────
+    // Approvals must have been sent via /api/peg/approve BEFORE calling this.
+    // We verify on-chain to give a clear error instead of a cryptic revert.
+    const allowAbi = ['function allowance(address,address) view returns (uint256)'];
+    const [tokenAllow, stableAllow] = await Promise.all([
+      new ethers.Contract(tokenAddress,  allowAbi, provider).allowance(signer.address, routerAddress) as Promise<bigint>,
+      new ethers.Contract(stableAddress, allowAbi, provider).allowance(signer.address, routerAddress) as Promise<bigint>,
+    ]);
+    if (tokenAllow < tokenRaw) {
+      throw new Error(
+        `Token not approved for router. Approve the token first via the Approve button. ` +
+        `Current allowance: ${ethers.formatUnits(tokenAllow, tokenDec)}, needed: ${tokenAmount}`
+      );
+    }
+    if (stableAllow < stableRaw) {
+      throw new Error(
+        `Stable not approved for router. Approve the stable first via the Approve button. ` +
+        `Current allowance: ${ethers.formatUnits(stableAllow, stableDec)}, needed: ${stableAmount}`
+      );
+    }
 
     // 5% slippage floor for initial liquidity
     const minToken  = (tokenRaw  * 95n) / 100n;

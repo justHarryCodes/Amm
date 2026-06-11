@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import {
   getPegStatus, getPegConfig, updatePegConfig,
   startBot, stopBot, pauseBot, resumeBot, getTradeHistory,
-  findPegPair, initPool, approvePegTokens,
+  findPegPair, initPool, getPegAllowances, approveToken, approveStable,
 } from '@/lib/api';
 import { useSSE } from '@/hooks/useSSE';
 import {
@@ -449,30 +449,36 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
 }
 
 // ── Pool Card ─────────────────────────────────────────────────────────────────
+interface Allowances {
+  tokenApproved: boolean; stableApproved: boolean;
+  tokenSymbol: string; stableSymbol: string; solana?: boolean;
+}
+
 function PoolCard({
   settings, onPairUpdated,
 }: {
   settings: PegSettings;
   onPairUpdated: (pair: string) => void;
 }) {
-  const [open,      setOpen]      = useState(!settings.pairAddress);
-  const [busy,      setBusy]      = useState(false);
-  const [approving, setApproving] = useState(false);
-  const [tokenAmt,  setTokenAmt]  = useState('');
-  const [stableAmt, setStableAmt] = useState('');
+  const [open,         setOpen]         = useState(!settings.pairAddress);
+  const [busy,         setBusy]         = useState(false);
+  const [approvingTok, setApprovingTok] = useState(false);
+  const [approvingStb, setApprovingStb] = useState(false);
+  const [tokenAmt,     setTokenAmt]     = useState('');
+  const [stableAmt,    setStableAmt]    = useState('');
+  const [allowances,   setAllowances]   = useState<Allowances | null>(null);
 
   const chain = settings.chain;
   const isEvm = chain === 'bsc' || chain === 'ethereum';
 
-  // Live balance checks for pre-flight
+  // Balance checks
   const { info: tokenInfo }  = useTokenBalance(settings.tokenAddress, chain);
   const { info: stableInfo } = useTokenBalance(settings.stableAddress, chain);
 
-  const tokenNeed  = parseFloat(tokenAmt)  || 0;
-  const stableNeed = parseFloat(stableAmt) || 0;
-  const tokenBal   = parseFloat(tokenInfo?.balance  ?? '0');
-  const stableBal  = parseFloat(stableInfo?.balance ?? '0');
-
+  const tokenNeed   = parseFloat(tokenAmt)  || 0;
+  const stableNeed  = parseFloat(stableAmt) || 0;
+  const tokenBal    = parseFloat(tokenInfo?.balance  ?? '0');
+  const stableBal   = parseFloat(stableInfo?.balance ?? '0');
   const tokenShort  = tokenNeed  > 0 && tokenBal  < tokenNeed;
   const stableShort = stableNeed > 0 && stableBal < stableNeed;
   const hasShortfall = tokenShort || stableShort;
@@ -480,7 +486,44 @@ function PoolCard({
   const openingPrice = tokenNeed > 0 && stableNeed > 0
     ? (stableNeed / tokenNeed).toFixed(8) : null;
 
-  const canCreate = !!(settings.tokenAddress && settings.stableAddress && (isEvm || chain === 'solana'));
+  // PancakeSwap rule: both tokens must be approved before Create Pool is enabled
+  const tokenApproved  = !isEvm || (allowances?.solana ?? false) || (allowances?.tokenApproved  ?? false);
+  const stableApproved = !isEvm || (allowances?.solana ?? false) || (allowances?.stableApproved ?? false);
+  const bothApproved   = tokenApproved && stableApproved;
+
+  const canSupply = bothApproved && !!tokenAmt && !!stableAmt && !hasShortfall
+    && !!(settings.tokenAddress && settings.stableAddress);
+
+  // Fetch on-chain allowances
+  const fetchAllowances = useCallback(async () => {
+    if (!isEvm || !settings.tokenAddress || !settings.stableAddress) return;
+    try {
+      const data = await getPegAllowances() as Allowances;
+      setAllowances(data);
+    } catch { /* ignore */ }
+  }, [isEvm, settings.tokenAddress, settings.stableAddress]);
+
+  useEffect(() => { fetchAllowances(); }, [fetchAllowances]);
+
+  async function handleApproveToken() {
+    setApprovingTok(true);
+    try {
+      await approveToken();
+      toast.success(`${allowances?.tokenSymbol ?? 'Token'} approved ✓`);
+      await fetchAllowances();
+    } catch (e: unknown) { toast.error((e as Error).message ?? 'Approval failed'); }
+    setApprovingTok(false);
+  }
+
+  async function handleApproveStable() {
+    setApprovingStb(true);
+    try {
+      await approveStable();
+      toast.success(`${allowances?.stableSymbol ?? 'Stable'} approved ✓`);
+      await fetchAllowances();
+    } catch (e: unknown) { toast.error((e as Error).message ?? 'Approval failed'); }
+    setApprovingStb(false);
+  }
 
   async function handleFind() {
     setBusy(true);
@@ -492,21 +535,11 @@ function PoolCard({
     setBusy(false);
   }
 
-  async function handleApprove() {
-    setApproving(true);
-    try {
-      const res = await approvePegTokens() as { alreadyApproved: boolean };
-      toast.success(res.alreadyApproved ? 'Already approved' : 'Tokens approved ✓');
-    } catch (e: unknown) { toast.error((e as Error).message ?? 'Approval failed'); }
-    setApproving(false);
-  }
-
   async function handleInit() {
     if (!tokenNeed || !stableNeed) { toast.error('Enter both amounts'); return; }
-    if (hasShortfall) { toast.error('Insufficient bot balance — send tokens first'); return; }
     setBusy(true);
     try {
-      const res = await initPool(tokenNeed, stableNeed) as { pairAddress: string; isNewPair: boolean; liquidityTxHash: string };
+      const res = await initPool(tokenNeed, stableNeed) as { pairAddress: string; isNewPair: boolean };
       onPairUpdated(res.pairAddress);
       toast.success(res.isNewPair ? 'Pool created & liquidity added!' : 'Liquidity added!');
     } catch (e: unknown) { toast.error((e as Error).message ?? 'Failed'); }
@@ -536,16 +569,15 @@ function PoolCard({
 
       {open && (
         <div className="mt-4 space-y-4">
-          {/* Find pair */}
-          {!settings.pairAddress && (
+
+          {/* Find existing pair */}
+          {!settings.pairAddress ? (
             <button onClick={handleFind} disabled={busy || !settings.tokenAddress || !settings.stableAddress}
               className="btn-ghost w-full text-sm disabled:opacity-40">
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               {busy ? 'Searching…' : chain === 'solana' ? 'Find pool on Raydium' : 'Find existing pair'}
             </button>
-          )}
-
-          {settings.pairAddress && settings.pairAddress !== 'FOUND_VIA_JUPITER' && (
+          ) : (
             <div className="surface flex items-center gap-2">
               <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
               <span className="text-xs font-mono text-zinc-400 flex-1 break-all">{settings.pairAddress}</span>
@@ -553,16 +585,18 @@ function PoolCard({
             </div>
           )}
 
-          {/* Liquidity amounts */}
+          {/* Amount inputs */}
           <div>
             <p className="text-xs text-zinc-500 font-medium mb-3">
-              {settings.pairAddress ? 'Add more liquidity' : `Create ${chain === 'solana' ? 'Raydium pool' : `${DEX[chain]} pair`}`}
+              {settings.pairAddress ? 'Add Liquidity' : `Create ${DEX[chain]} Pool`}
             </p>
 
-            {/* Token amount row */}
+            {/* Token input */}
             <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 mb-2">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-zinc-500">Token amount</span>
+                <span className="text-xs text-zinc-500">
+                  {tokenInfo?.symbol ?? 'Token'} amount
+                </span>
                 {tokenInfo && (
                   <span className={clsx('text-xs font-medium', tokenShort ? 'text-amber-400' : 'text-zinc-500')}>
                     Bal: {parseFloat(tokenInfo.balance).toLocaleString()} {tokenInfo.symbol}
@@ -575,15 +609,17 @@ function PoolCard({
               {tokenShort && tokenInfo && (
                 <p className="mt-1 text-xs text-amber-400 flex items-center gap-1">
                   <AlertCircle className="h-3 w-3" />
-                  Need {(tokenNeed - tokenBal).toLocaleString()} more {tokenInfo.symbol}
+                  Need {(tokenNeed - tokenBal).toLocaleString()} more — send to bot
                 </p>
               )}
             </div>
 
-            {/* Stable amount row */}
+            {/* Stable input */}
             <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-zinc-500">Stable amount</span>
+                <span className="text-xs text-zinc-500">
+                  {stableInfo?.symbol ?? 'Stable'} amount
+                </span>
                 {stableInfo && (
                   <span className={clsx('text-xs font-medium', stableShort ? 'text-amber-400' : 'text-zinc-500')}>
                     Bal: {parseFloat(stableInfo.balance).toLocaleString()} {stableInfo.symbol}
@@ -596,7 +632,7 @@ function PoolCard({
               {stableShort && stableInfo && (
                 <p className="mt-1 text-xs text-amber-400 flex items-center gap-1">
                   <AlertCircle className="h-3 w-3" />
-                  Need {(stableNeed - stableBal).toLocaleString()} more {stableInfo.symbol}
+                  Need {(stableNeed - stableBal).toLocaleString()} more — send to bot
                 </p>
               )}
             </div>
@@ -609,45 +645,95 @@ function PoolCard({
             )}
           </div>
 
-          {/* Shortfall warning */}
+          {/* Bot wallet shortfall warning */}
           {hasShortfall && (tokenInfo || stableInfo) && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/8 p-3 space-y-1.5">
               <p className="text-xs text-amber-300 font-medium flex items-center gap-1.5">
                 <AlertCircle className="h-4 w-4" /> Insufficient bot balance
               </p>
-              <p className="text-xs text-zinc-500">
-                Send the required tokens to the bot wallet before creating the pool.
+              <div className="flex items-center gap-2 bg-zinc-900/60 rounded-lg px-2.5 py-2">
+                <span className="text-xs font-mono text-zinc-400 flex-1 break-all">
+                  {tokenInfo?.botAddress ?? stableInfo?.botAddress}
+                </span>
+                <CopyBtn text={tokenInfo?.botAddress ?? stableInfo?.botAddress ?? ''} />
+              </div>
+            </div>
+          )}
+
+          {/* ── APPROVAL STEP (EVM only) — PancakeSwap / Uniswap style ── */}
+          {isEvm && settings.tokenAddress && settings.stableAddress && (
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
+              <p className="text-xs font-semibold text-zinc-400">
+                Step 1 — Approve router to spend tokens
               </p>
-              {(tokenInfo || stableInfo) && (
-                <div className="flex items-center gap-2 bg-zinc-900/60 rounded-lg px-2.5 py-2">
-                  <span className="text-xs font-mono text-zinc-400 flex-1 break-all">
-                    {tokenInfo?.botAddress ?? stableInfo?.botAddress}
-                  </span>
-                  <CopyBtn text={tokenInfo?.botAddress ?? stableInfo?.botAddress ?? ''} />
+
+              <div className="grid grid-cols-2 gap-2">
+                {/* Token approve */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-1.5">
+                    {tokenApproved
+                      ? <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
+                      : <div className="h-4 w-4 rounded-full border-2 border-zinc-600 shrink-0" />}
+                    <span className="text-xs text-zinc-400 font-medium">
+                      {allowances?.tokenSymbol ?? tokenInfo?.symbol ?? 'Token'}
+                    </span>
+                  </div>
+                  {!tokenApproved && (
+                    <button onClick={handleApproveToken} disabled={approvingTok || approvingStb}
+                      className="btn-ghost w-full text-xs disabled:opacity-40">
+                      {approvingTok
+                        ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Approving…</>
+                        : `Approve ${allowances?.tokenSymbol ?? 'Token'}`}
+                    </button>
+                  )}
                 </div>
+
+                {/* Stable approve */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-1.5">
+                    {stableApproved
+                      ? <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
+                      : <div className="h-4 w-4 rounded-full border-2 border-zinc-600 shrink-0" />}
+                    <span className="text-xs text-zinc-400 font-medium">
+                      {allowances?.stableSymbol ?? stableInfo?.symbol ?? 'Stable'}
+                    </span>
+                  </div>
+                  {!stableApproved && (
+                    <button onClick={handleApproveStable} disabled={approvingTok || approvingStb}
+                      className="btn-ghost w-full text-xs disabled:opacity-40">
+                      {approvingStb
+                        ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Approving…</>
+                        : `Approve ${allowances?.stableSymbol ?? 'Stable'}`}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {bothApproved && (
+                <p className="text-xs text-brand-400 font-medium flex items-center gap-1.5">
+                  <CheckCircle className="h-3.5 w-3.5" /> Both tokens approved — ready to supply
+                </p>
               )}
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex gap-2">
-            {isEvm && settings.tokenAddress && settings.stableAddress && (
-              <button type="button" onClick={handleApprove} disabled={approving || busy}
-                className="btn-ghost flex-1 text-sm disabled:opacity-40">
-                {approving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4 text-brand-400" />}
-                {approving ? 'Approving…' : 'Approve'}
-              </button>
-            )}
-            <button onClick={handleInit}
-              disabled={busy || !canCreate || !tokenAmt || !stableAmt || hasShortfall}
-              className="btn-primary flex-1 disabled:opacity-40">
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Droplets className="h-4 w-4" />}
-              {busy ? 'Sending…' : settings.pairAddress ? 'Add Liquidity' : 'Create Pool'}
+          {/* Step 2 — Supply */}
+          <div>
+            <p className="text-xs font-semibold text-zinc-400 mb-2">
+              {isEvm ? 'Step 2 — ' : ''}
+              {settings.pairAddress ? 'Add Liquidity' : `Create ${DEX[chain]} Pool`}
+            </p>
+            <button onClick={handleInit} disabled={busy || !canSupply}
+              className="btn-primary w-full disabled:opacity-40">
+              {busy
+                ? <><Loader2 className="h-4 w-4 animate-spin" /> Sending transaction…</>
+                : <><Droplets className="h-4 w-4" /> {settings.pairAddress ? 'Add Liquidity' : 'Create Pool & Add Liquidity'}</>}
             </button>
+            {isEvm && !bothApproved && (
+              <p className="text-xs text-center text-zinc-600 mt-2">Approve both tokens above to enable</p>
+            )}
           </div>
-          {!canCreate && (
-            <p className="text-xs text-center text-amber-400">Set token + stable in Pair Setup first</p>
-          )}
+
         </div>
       )}
     </div>

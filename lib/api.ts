@@ -36,7 +36,9 @@ export const getBotBalance     = ()          => api.get('/api/peg/balance').then
 export const findPegPair       = ()          => api.get('/api/peg/find-pair').then(r => r.data);
 export const initPool          = (tokenAmount: number, stableAmount: number) =>
   api.post('/api/peg/init-pool', { tokenAmount, stableAmount }).then(r => r.data);
-export const approvePegTokens  = ()          => api.post('/api/peg/approve').then(r => r.data);
+export const getPegAllowances  = ()          => api.get('/api/peg/allowances').then(r => r.data);
+export const approveToken      = ()          => api.post('/api/peg/approve', { target: 'token'  }).then(r => r.data);
+export const approveStable     = ()          => api.post('/api/peg/approve', { target: 'stable' }).then(r => r.data);
 
 // ── Bulk Sender ────────────────────────────────────────
 export const getBulkConfig     = ()          => api.get('/api/bulk/config').then(r => r.data);
