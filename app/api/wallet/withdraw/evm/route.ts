@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { ethers } from 'ethers';
 import { getChainSigner, getGasPrice } from '@/lib/blockchain/provider';
 
-const API_KEY = process.env.API_SECRET;
-
 const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
   'function decimals() view returns (uint8)',
@@ -11,10 +9,6 @@ const ERC20_ABI = [
 ];
 
 export async function POST(req: NextRequest) {
-  if (req.headers.get('x-api-key') !== API_KEY) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
   const body = await req.json() as {
     chain: 'bsc' | 'ethereum';
     asset: 'native' | string; // 'native' or token contract address

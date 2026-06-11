@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { headers } from 'next/headers';
 import { ethers } from 'ethers';
 import { pegMaintainer } from '@/lib/services/pegMaintainer';
 import { ensureApproval } from '@/lib/blockchain/contracts';
@@ -7,14 +6,7 @@ import { ensureApproval } from '@/lib/blockchain/contracts';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const API_KEY = process.env.API_SECRET;
-
 export async function POST() {
-  const headersList = headers();
-  if (headersList.get('x-api-key') !== API_KEY) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
   const { chain, tokenAddress, stableAddress, routerAddress } = pegMaintainer.settings;
 
   if (chain === 'solana') {

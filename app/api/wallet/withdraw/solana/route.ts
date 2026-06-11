@@ -14,13 +14,7 @@ import {
 } from '@solana/spl-token';
 import { getSolanaConnection, getSolanaKeypair } from '@/lib/solana/connection';
 
-const API_KEY = process.env.API_SECRET;
-
 export async function POST(req: NextRequest) {
-  if (req.headers.get('x-api-key') !== API_KEY) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
   const body = await req.json() as {
     asset: 'sol' | string; // 'sol' or SPL token mint address
     amount: string;

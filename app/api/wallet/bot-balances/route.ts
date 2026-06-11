@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { ethers } from 'ethers';
-import { headers } from 'next/headers';
 import { getChainProvider, getChainSigner } from '@/lib/blockchain/provider';
 import { getSolanaConnection, getSolanaKeypair } from '@/lib/solana/connection';
 import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
@@ -10,8 +9,6 @@ import { CHAIN_TOKENS } from '@/lib/tokens';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const API_KEY = process.env.API_SECRET;
 
 const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -52,11 +49,6 @@ async function getSplBalance(
 }
 
 export async function GET() {
-  const headersList = headers();
-  if (headersList.get('x-api-key') !== API_KEY) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
   const { chain, tokenAddress, stableAddress } = pegMaintainer.settings;
   const isEvm = chain === 'bsc' || chain === 'ethereum';
 
