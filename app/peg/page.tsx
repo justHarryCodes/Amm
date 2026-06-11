@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import toast from 'react-hot-toast';
 import {
   getPegStatus, getPegConfig, updatePegConfig,
@@ -9,7 +9,8 @@ import {
 import { useSSE } from '@/hooks/useSSE';
 import {
   Play, Square, Pause, RotateCcw, CheckCircle, XCircle,
-  Clock, ExternalLink, ChevronDown, ChevronUp, Search, Droplets,
+  Clock, ExternalLink, Search, Droplets, Copy, Check,
+  ChevronDown, ChevronUp, AlertCircle,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { CHAIN_TOKENS } from '@/lib/tokens';
@@ -38,24 +39,74 @@ const EXPLORER: Record<PegChain, (tx: string) => string> = {
   solana:   tx => `https://solscan.io/tx/${tx}`,
 };
 
-const DEX_NAME: Record<PegChain, string> = {
-  bsc: CHAIN_TOKENS.bsc.dex, ethereum: CHAIN_TOKENS.ethereum.dex, solana: CHAIN_TOKENS.solana.dex,
+const DEX: Record<PegChain, string> = {
+  bsc: CHAIN_TOKENS.bsc.dex,
+  ethereum: CHAIN_TOKENS.ethereum.dex,
+  solana: CHAIN_TOKENS.solana.dex,
 };
 
-const DEFAULT_ROUTERS: Record<PegChain, string> = {
-  bsc: CHAIN_TOKENS.bsc.router, ethereum: CHAIN_TOKENS.ethereum.router, solana: '',
+const DEFAULT_ROUTER: Record<PegChain, string> = {
+  bsc: CHAIN_TOKENS.bsc.router,
+  ethereum: CHAIN_TOKENS.ethereum.router,
+  solana: '',
 };
 
-const STATE_DOT: Record<string, string> = {
-  STOPPED: 'bg-zinc-500',
+const STATE_COLOR: Record<string, string> = {
+  STOPPED:      'bg-zinc-500',
   MONITOR_ONLY: 'bg-amber-400 animate-pulse',
-  AUTO_TRADE: 'bg-brand-400 animate-pulse',
-  PAUSED: 'bg-red-400',
+  AUTO_TRADE:   'bg-brand-400 animate-pulse',
+  PAUSED:       'bg-red-400',
 };
 
-const CHAIN_COLORS: Record<PegChain, string> = {
+const CHAIN_BADGE: Record<PegChain, string> = {
   bsc: 'badge-yellow', ethereum: 'badge-blue', solana: 'badge-purple',
 };
+
+function CopyBtn({ text }: { text: string }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <button onClick={() => { navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 1500); }}
+      className="p-1 text-zinc-500 hover:text-zinc-300 transition-colors">
+      {ok ? <Check className="h-3.5 w-3.5 text-brand-400" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+// ── Token balance hook ────────────────────────────────────────────────────────
+
+interface TokenInfo { botAddress: string; balance: string; symbol: string; }
+
+function useTokenBalance(tokenAddress: string, chain: PegChain) {
+  const [info, setInfo]     = useState<TokenInfo | null>(null);
+  const [checking, setCheck] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const isEvm = chain === 'bsc' || chain === 'ethereum';
+    const valid  = isEvm
+      ? tokenAddress.startsWith('0x') && tokenAddress.length === 42
+      : tokenAddress.length >= 32;
+
+    setInfo(null);
+    if (timer.current) clearTimeout(timer.current);
+    if (!valid) return;
+
+    timer.current = setTimeout(async () => {
+      setCheck(true);
+      try {
+        const res = await fetch(`/api/peg/token-balance?tokenAddress=${encodeURIComponent(tokenAddress)}`);
+        if (res.ok) setInfo(await res.json() as TokenInfo);
+      } catch { /* ignore */ }
+      setCheck(false);
+    }, 600);
+
+    return () => { if (timer.current) clearTimeout(timer.current); };
+  }, [tokenAddress, chain]);
+
+  return { info, checking };
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function PegPage() {
   const [status,   setStatus]   = useState<PegStatus | null>(null);
@@ -63,19 +114,12 @@ export default function PegPage() {
   const [trades,   setTrades]   = useState<Trade[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [busy,     setBusy]     = useState(false);
-
-  // accordion state
-  const [setupOpen,  setSetupOpen]  = useState(false);
-  const [poolOpen,   setPoolOpen]   = useState(false);
-  const [limitsOpen, setLimitsOpen] = useState(false);
+  const [poolOpen, setPoolOpen] = useState(false);
 
   const { on } = useSSE();
 
   const refresh = useCallback(async () => {
-    // Fetch independently — a DB failure on status/trades must not hide the config form
-    const [s, cfg, t] = await Promise.allSettled([
-      getPegStatus(), getPegConfig(), getTradeHistory(20),
-    ]);
+    const [s, cfg, t] = await Promise.allSettled([getPegStatus(), getPegConfig(), getTradeHistory(20)]);
     if (cfg.status === 'fulfilled') setSettings(cfg.value as PegSettings);
     if (s.status   === 'fulfilled') setStatus(s.value as PegStatus);
     if (t.status   === 'fulfilled') setTrades(t.value as Trade[]);
@@ -105,88 +149,107 @@ export default function PegPage() {
     setBusy(false);
   }
 
-  const state   = status?.state ?? 'STOPPED';
-  const chain   = (settings?.chain ?? status?.chain ?? 'bsc') as PegChain;
-  const price   = status?.currentPrice;
-  const target  = status?.targetPeg ?? settings?.targetPeg ?? 1;
-  const dev     = price != null && target > 0 ? ((price - target) / target) * 100 : null;
+  const state  = status?.state ?? 'STOPPED';
+  const chain  = (settings?.chain ?? status?.chain ?? 'bsc') as PegChain;
+  const price  = status?.currentPrice;
+  const target = status?.targetPeg ?? settings?.targetPeg ?? 1;
+  const dev    = price != null && target > 0 ? ((price - target) / target) * 100 : null;
   const inRange = dev != null && Math.abs(dev) <= (settings?.upperBand ?? 0.02) * 100;
 
-  const missingConfig = settings && (
-    !settings.tokenAddress ||
-    !settings.stableAddress ||
-    ((chain === 'bsc' || chain === 'ethereum') && !settings.pairAddress)
-  );
+  const readyToRun = settings && settings.tokenAddress && settings.stableAddress
+    && (chain === 'solana' || !!settings.pairAddress);
 
   async function saveSettings(s: PegSettings) {
     try {
       await updatePegConfig(s as unknown as Record<string, number | string>);
       setSettings(s);
-      toast.success('Settings saved');
-      setSetupOpen(false);
+      toast.success('Saved');
     } catch (e: unknown) { toast.error((e as Error).message ?? 'Failed'); }
+  }
+
+  if (loading) {
+    return (
+      <div className="page space-y-3">
+        {[...Array(3)].map((_, i) => <div key={i} className="h-32 bg-zinc-800 rounded-2xl animate-pulse" />)}
+      </div>
+    );
   }
 
   return (
     <div className="page">
 
-      {/* ── 1. STATUS CARD ── always visible ──────────── */}
+      {/* ── 1. STATUS ──────────────────────────────────── */}
       <div className="card">
-
-        {/* Header row */}
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-start justify-between">
           <div className="flex items-center gap-2">
-            <span className={clsx('h-2.5 w-2.5 rounded-full shrink-0', STATE_DOT[state])} />
-            <span className="font-semibold text-zinc-100 text-sm">{state.replace('_', ' ')}</span>
-            <span className={clsx('badge', CHAIN_COLORS[chain])}>{chain.toUpperCase()}</span>
+            <span className={clsx('h-2.5 w-2.5 rounded-full shrink-0 mt-0.5', STATE_COLOR[state])} />
+            <div>
+              <p className="text-sm font-semibold text-zinc-100">{state.replace('_', ' ')}</p>
+              <span className={clsx('badge text-xs', CHAIN_BADGE[chain])}>{chain.toUpperCase()} · {DEX[chain]}</span>
+            </div>
           </div>
           {price != null ? (
             <div className="text-right">
               <p className="text-2xl font-bold font-mono text-zinc-50 leading-none">${price.toFixed(6)}</p>
-              {dev != null && (
-                <p className={clsx('text-xs mt-0.5', inRange ? 'text-brand-400' : 'text-amber-400')}>
-                  {dev >= 0 ? '▲' : '▼'} {Math.abs(dev).toFixed(3)}% from peg
-                </p>
-              )}
+              <p className={clsx('text-xs mt-0.5', inRange ? 'text-brand-400' : 'text-amber-400')}>
+                {dev != null ? `${dev >= 0 ? '▲' : '▼'} ${Math.abs(dev).toFixed(3)}% from peg` : ''}
+              </p>
             </div>
           ) : (
-            <p className="text-sm text-zinc-600">No price yet</p>
+            <p className="text-sm text-zinc-600">No price data</p>
           )}
         </div>
 
         {/* Peg bar */}
         {status && price != null && (
-          <div className="mb-4">
-            <div className="flex justify-between text-xs text-zinc-600 mb-1">
+          <div className="mt-3">
+            <div className="h-1.5 bg-zinc-800 rounded-full relative overflow-hidden">
+              <div className="absolute inset-y-0 left-[25%] right-[25%] bg-brand-500/15 rounded-full" />
+              <div
+                className={clsx('absolute top-0 bottom-0 w-2 rounded-full transition-all duration-500',
+                  inRange ? 'bg-brand-400' : 'bg-amber-400')}
+                style={{ left: `${Math.max(2, Math.min(93, ((price - status.lowerBound) / Math.max(status.upperBound - status.lowerBound, 0.000001)) * 100))}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-xs text-zinc-700 mt-1">
               <span>${status.lowerBound.toFixed(5)}</span>
-              <span className="text-zinc-500">target ${target.toFixed(5)}</span>
+              <span className="text-zinc-600">target ${target.toFixed(5)}</span>
               <span>${status.upperBound.toFixed(5)}</span>
             </div>
-            <div className="h-2 bg-zinc-800 rounded-full relative overflow-hidden">
-              <div className="absolute inset-y-0 left-[28%] right-[28%] bg-brand-500/15 rounded-full" />
-              <div
-                className={clsx('absolute top-0.5 bottom-0.5 w-2.5 rounded-full transition-all duration-500',
-                  inRange ? 'bg-brand-400' : 'bg-amber-400')}
-                style={{ left: `${Math.max(2, Math.min(94, ((price - status.lowerBound) / (status.upperBound - status.lowerBound)) * 100))}%` }}
-              />
+          </div>
+        )}
+
+        {/* Mini stats */}
+        {status && (
+          <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-zinc-800/60 text-center">
+            <div>
+              <p className="text-xs text-zinc-600">Liquidity</p>
+              <p className="text-sm font-semibold text-zinc-200 mt-0.5">
+                {status.liquidityUsd ? `$${(status.liquidityUsd / 1000).toFixed(1)}k` : '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-600">24h Trades</p>
+              <p className="text-sm font-semibold text-zinc-200 mt-0.5">{status.dailyStats.totalTrades}</p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-600">Last check</p>
+              <p className="text-sm font-semibold text-zinc-200 mt-0.5">
+                {status.lastUpdated ? new Date(status.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+              </p>
             </div>
           </div>
         )}
 
         {/* Controls */}
-        {missingConfig && state === 'STOPPED' && (
-          <div className="mb-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
-            Complete the setup steps below before starting.
-          </div>
-        )}
-        <div className="flex gap-2">
+        <div className="flex gap-2 mt-4">
           {state === 'STOPPED' && (
             <>
-              <button disabled={busy || !!missingConfig} onClick={() => act(() => startBot('MONITOR_ONLY'), 'Monitoring started')}
+              <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('MONITOR_ONLY'), 'Monitoring started')}
                 className="btn-ghost flex-1 text-sm disabled:opacity-40">
                 <Play className="h-4 w-4 text-amber-400" /> Monitor
               </button>
-              <button disabled={busy || !!missingConfig} onClick={() => act(() => startBot('AUTO_TRADE'), 'Auto-trade started')}
+              <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('AUTO_TRADE'), 'Auto-trade started')}
                 className="btn-primary flex-1 text-sm disabled:opacity-40">
                 <Play className="h-4 w-4" /> Auto Trade
               </button>
@@ -197,110 +260,63 @@ export default function PegPage() {
               <button disabled={busy} onClick={() => act(stopBot, 'Bot stopped')} className="btn-ghost flex-1 text-sm">
                 <Square className="h-4 w-4" /> Stop
               </button>
-              <button disabled={busy} onClick={() => act(pauseBot, 'Bot paused')} className="btn-danger flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(pauseBot, 'Paused')} className="btn-danger flex-1 text-sm">
                 <Pause className="h-4 w-4" /> Pause
               </button>
             </>
           )}
           {state === 'PAUSED' && (
             <>
-              <button disabled={busy} onClick={() => act(resumeBot, 'Bot resumed')} className="btn-primary flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(resumeBot, 'Resumed')} className="btn-primary flex-1 text-sm">
                 <RotateCcw className="h-4 w-4" /> Resume
               </button>
-              <button disabled={busy} onClick={() => act(stopBot, 'Bot stopped')} className="btn-ghost flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(stopBot, 'Stopped')} className="btn-ghost flex-1 text-sm">
                 <Square className="h-4 w-4" /> Stop
               </button>
             </>
           )}
         </div>
 
-        {/* Mini stats */}
-        {status && (
-          <div className="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-zinc-800/60 text-center">
-            {[
-              ['Liquidity',  status.liquidityUsd ? `$${(status.liquidityUsd / 1000).toFixed(1)}k` : '—'],
-              ['24h Trades', status.dailyStats.totalTrades],
-              ['Last check', status.lastUpdated ? new Date(status.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'],
-            ].map(([label, value]) => (
-              <div key={label as string}>
-                <p className="text-xs text-zinc-600">{label}</p>
-                <p className="text-sm font-semibold text-zinc-200 mt-0.5">{value}</p>
-              </div>
-            ))}
-          </div>
+        {!readyToRun && state === 'STOPPED' && (
+          <p className="mt-2 text-center text-xs text-zinc-600">
+            Complete setup below to enable trading
+          </p>
         )}
       </div>
 
-      {/* ── 2. SETUP GUIDE — shown when stopped & incomplete ── */}
-      {settings && state === 'STOPPED' && (
-        <SetupGuide
+      {/* ── 2. SETUP ───────────────────────────────────── */}
+      {settings && (
+        <SetupCard
           settings={settings}
-          chain={chain}
-          onOpenSetup={() => setSetupOpen(true)}
-          onOpenPool={() => setPoolOpen(true)}
+          onSave={saveSettings}
+          onPoolNeeded={() => setPoolOpen(true)}
         />
       )}
 
-      {/* ── 3. SETUP (accordion) ──────────────────────── */}
+      {/* ── 3. POOL / LIQUIDITY ────────────────────────── */}
       {settings && (
         <div className="card">
-          <button onClick={() => setSetupOpen(v => !v)}
-            className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-zinc-100 text-sm">Setup</span>
-              {(!settings.tokenAddress || (!settings.pairAddress && chain !== 'solana')) && (
-                <span className="badge badge-yellow text-xs">Incomplete</span>
-              )}
-            </div>
-            {setupOpen ? <ChevronUp className="h-4 w-4 text-zinc-500" /> : <ChevronDown className="h-4 w-4 text-zinc-500" />}
-          </button>
-
-          {/* Summary row when collapsed */}
-          {!setupOpen && settings.tokenAddress && (
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
-              <span>Token: <span className="font-mono text-zinc-400">{settings.tokenAddress.slice(0, 8)}…</span></span>
-              <span>Target: <span className="text-zinc-300">${settings.targetPeg}</span></span>
-              <span>Band: <span className="text-zinc-300">±{(settings.upperBand * 100).toFixed(1)}%</span></span>
-            </div>
-          )}
-
-          {setupOpen && (
-            <SetupForm
-              settings={settings}
-              onSave={saveSettings}
-              limitsOpen={limitsOpen}
-              onToggleLimits={() => setLimitsOpen(v => !v)}
-            />
-          )}
-        </div>
-      )}
-
-      {/* ── 4. POOL LIQUIDITY (accordion) ────────────── */}
-      {settings && (
-        <div className="card">
-          <button onClick={() => setPoolOpen(v => !v)}
-            className="flex items-center justify-between w-full">
+          <button onClick={() => setPoolOpen(v => !v)} className="flex items-center justify-between w-full">
             <div className="flex items-center gap-2">
               <Droplets className="h-4 w-4 text-blue-400" />
               <span className="font-semibold text-zinc-100 text-sm">Pool Liquidity</span>
-              <span className="text-xs text-zinc-600">({DEX_NAME[chain]})</span>
+              {settings.pairAddress
+                ? <span className="text-xs text-brand-400">✓ Pair set</span>
+                : <span className="badge badge-yellow text-xs">Not set</span>
+              }
             </div>
             {poolOpen ? <ChevronUp className="h-4 w-4 text-zinc-500" /> : <ChevronDown className="h-4 w-4 text-zinc-500" />}
           </button>
 
-          {!poolOpen && (
-            <p className="mt-2 text-xs text-zinc-500">
-              {settings.pairAddress
-                ? `Pair: ${settings.pairAddress.slice(0, 10)}…`
-                : chain === 'solana' ? 'No pool found yet' : 'No pair set'}
-            </p>
+          {!poolOpen && settings.pairAddress && settings.pairAddress !== 'FOUND_VIA_JUPITER' && (
+            <p className="mt-1.5 text-xs font-mono text-zinc-600">{settings.pairAddress.slice(0, 14)}…</p>
           )}
 
           {poolOpen && (
             <PoolSection
               settings={settings}
               onChainChanged={async (c) => {
-                const updated = { ...settings, chain: c, pairAddress: '', tokenAddress: '', stableAddress: c === 'solana' ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' : '', routerAddress: DEFAULT_ROUTERS[c] };
+                const updated = { ...settings, chain: c, pairAddress: '', tokenAddress: '', stableAddress: c === 'solana' ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' : '', routerAddress: DEFAULT_ROUTER[c] };
                 try { await updatePegConfig(updated as unknown as Record<string, number | string>); setSettings(updated); } catch { /* ignore */ }
               }}
               onPairUpdated={pair => setSettings(s => s ? { ...s, pairAddress: pair } : s)}
@@ -309,28 +325,26 @@ export default function PegPage() {
         </div>
       )}
 
-      {/* ── 5. RECENT ACTIVITY ───────────────────────── */}
+      {/* ── 4. RECENT TRADES ───────────────────────────── */}
       <div className="card">
-        <p className="font-semibold text-zinc-100 text-sm mb-3">Recent Activity</p>
-        {loading ? (
-          <div className="space-y-2">
-            {[...Array(3)].map((_, i) => <div key={i} className="h-12 bg-zinc-800 rounded-xl animate-pulse" />)}
-          </div>
-        ) : trades.length === 0 ? (
-          <p className="text-center text-zinc-600 text-sm py-8">No trades yet — start the bot to begin</p>
+        <p className="font-semibold text-zinc-100 text-sm mb-3">Recent Trades</p>
+        {trades.length === 0 ? (
+          <p className="text-center text-zinc-600 text-sm py-6">No trades yet</p>
         ) : (
           <div className="space-y-2">
             {trades.map(t => (
               <div key={t.id} className="surface flex items-center gap-3">
-                <div className={clsx('h-8 w-8 rounded-xl flex items-center justify-center shrink-0 text-xs font-bold',
-                  t.action === 'BUY' ? 'bg-brand-500/10 text-brand-400' : 'bg-red-500/10 text-red-400')}>
+                <div className={clsx(
+                  'h-8 w-8 rounded-xl flex items-center justify-center shrink-0 text-xs font-bold',
+                  t.action === 'BUY' ? 'bg-brand-500/10 text-brand-400' : 'bg-red-500/10 text-red-400'
+                )}>
                   {t.action === 'BUY' ? 'B' : 'S'}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-zinc-200 font-medium">{Number(t.token_amount).toFixed(2)} tokens</span>
                     <span className="text-zinc-600">${Number(t.stable_amount).toFixed(4)}</span>
-                    {t.price_after && <span className="text-zinc-600">→ ${t.price_after.toFixed(6)}</span>}
+                    {t.price_after != null && <span className="text-zinc-600">→ ${t.price_after.toFixed(6)}</span>}
                   </div>
                   <p className="text-xs text-zinc-600 mt-0.5">{new Date(t.timestamp).toLocaleString()}</p>
                 </div>
@@ -354,169 +368,26 @@ export default function PegPage() {
   );
 }
 
-// ── Setup guide ───────────────────────────────────────────────────────────────
+// ── Setup card ────────────────────────────────────────────────────────────────
 
-interface GuideStep {
-  n: number;
-  label: string;
-  done: boolean;
-  cta?: React.ReactNode;
-  note?: React.ReactNode;
-}
-
-function SetupGuide({
-  settings, chain, onOpenSetup, onOpenPool,
-}: {
-  settings: PegSettings;
-  chain: PegChain;
-  onOpenSetup: () => void;
-  onOpenPool: () => void;
-}) {
-  const [approving, setApproving]   = useState(false);
-  const [approveResult, setResult]  = useState<'idle' | 'done' | 'already'>('idle');
-
-  const isEvm        = chain === 'bsc' || chain === 'ethereum';
-  const hasAddresses = !!(settings.tokenAddress && settings.stableAddress);
-  const hasPair      = !!(settings.pairAddress);
-  const isApproved   = approveResult === 'done' || approveResult === 'already';
-
-  async function handleApprove() {
-    setApproving(true);
-    try {
-      const res = await approvePegTokens();
-      setResult(res.alreadyApproved ? 'already' : 'done');
-      toast.success(res.alreadyApproved ? 'Already approved — ready to trade' : 'Tokens approved for the router');
-    } catch (e: unknown) {
-      toast.error((e as Error).message ?? 'Approval failed');
-    }
-    setApproving(false);
-  }
-
-  const evmSteps: GuideStep[] = [
-    {
-      n: 1,
-      label: 'Open Setup and enter your token address + choose a stablecoin (USDC, USDT, or WBNB/WETH)',
-      done: hasAddresses,
-      cta: !hasAddresses && (
-        <button onClick={onOpenSetup} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
-          Open Setup ↑
-        </button>
-      ),
-    },
-    {
-      n: 2,
-      label: 'Open Pool Liquidity — find an existing pair or create a new one to seed initial liquidity',
-      done: hasPair,
-      cta: hasAddresses && !hasPair && (
-        <button onClick={onOpenPool} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
-          Open Pool Liquidity ↓
-        </button>
-      ),
-    },
-    {
-      n: 3,
-      label: 'Approve your token and stablecoin so the router can trade on the bot\'s behalf',
-      done: isApproved,
-      cta: hasPair && !isApproved && (
-        <button
-          onClick={handleApprove}
-          disabled={approving}
-          className="mt-1.5 btn-ghost text-xs px-3 py-1.5 disabled:opacity-40"
-        >
-          {approving ? 'Approving…' : 'Approve Tokens'}
-        </button>
-      ),
-      note: isApproved && (
-        <span className="text-xs text-brand-400 mt-1 block">
-          {approveResult === 'already' ? 'Already approved' : 'Approval confirmed ✓'}
-        </span>
-      ),
-    },
-    {
-      n: 4,
-      label: 'Start the bot in Monitor Only (watch prices, no trades) or Auto Trade mode',
-      done: false,
-    },
-  ];
-
-  const solanaSteps: GuideStep[] = [
-    {
-      n: 1,
-      label: 'Open Setup and enter your token mint address + choose a stablecoin (USDC, USDT, or wSOL)',
-      done: hasAddresses,
-      cta: !hasAddresses && (
-        <button onClick={onOpenSetup} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
-          Open Setup ↑
-        </button>
-      ),
-    },
-    {
-      n: 2,
-      label: 'Open Pool Liquidity — find an existing Raydium pool or create one with initial liquidity',
-      done: hasPair,
-      cta: hasAddresses && !hasPair && (
-        <button onClick={onOpenPool} className="mt-1.5 text-xs text-brand-400 hover:text-brand-300 underline underline-offset-2">
-          Open Pool Liquidity ↓
-        </button>
-      ),
-    },
-    {
-      n: 3,
-      label: 'Start the bot — Jupiter will route all trades through your Raydium pool automatically',
-      done: false,
-    },
-  ];
-
-  const steps = isEvm ? evmSteps : solanaSteps;
-  const allDoneExceptLast = steps.slice(0, -1).every(s => s.done);
-
-  return (
-    <div className="card">
-      <p className="font-semibold text-zinc-100 text-sm mb-4">Getting Started</p>
-      <ol className="space-y-4">
-        {steps.map((step) => (
-          <li key={step.n} className="flex gap-3">
-            <span className={clsx(
-              'flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold mt-0.5',
-              step.done
-                ? 'bg-brand-500 text-white'
-                : allDoneExceptLast && step.n === steps.length
-                  ? 'bg-amber-500/20 border border-amber-500 text-amber-400'
-                  : 'bg-zinc-800 text-zinc-500'
-            )}>
-              {step.done ? '✓' : step.n}
-            </span>
-            <div>
-              <p className={clsx('text-sm leading-snug', step.done ? 'text-zinc-500 line-through' : 'text-zinc-200')}>
-                {step.label}
-              </p>
-              {'cta' in step && step.cta}
-              {'note' in step && step.note}
-            </div>
-          </li>
-        ))}
-      </ol>
-
-      {!isEvm && (
-        <p className="mt-4 text-xs text-zinc-600">
-          Solana: no approval step needed — SPL token transfers use associated token accounts (ATAs) managed automatically.
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ── Setup form ────────────────────────────────────────────────────────────────
-
-function SetupForm({
-  settings, onSave, limitsOpen, onToggleLimits,
+function SetupCard({
+  settings, onSave, onPoolNeeded,
 }: {
   settings: PegSettings;
   onSave: (s: PegSettings) => void;
-  limitsOpen: boolean;
-  onToggleLimits: () => void;
+  onPoolNeeded: () => void;
 }) {
-  const [s, setS] = useState(settings);
+  const [s, setS]           = useState(settings);
+  const [limitsOpen, setLimitsOpen] = useState(false);
+  const [approving, setApproving]   = useState(false);
+
+  // Sync if parent settings change (e.g. after chain switch from pool section)
+  useEffect(() => { setS(settings); }, [settings]);
+
+  const { info: tokenInfo, checking } = useTokenBalance(s.tokenAddress, s.chain);
+  const hasNoTokenBalance = tokenInfo && parseFloat(tokenInfo.balance) === 0;
+
+  const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
 
   const str = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setS(p => ({ ...p, [k]: e.target.value }));
@@ -528,112 +399,175 @@ function SetupForm({
       ...p, chain: c,
       tokenAddress: '', pairAddress: '',
       stableAddress: c === 'solana' ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' : '',
-      routerAddress: DEFAULT_ROUTERS[c],
+      routerAddress: DEFAULT_ROUTER[c],
     }));
   }
 
-  const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
+  async function handleApprove() {
+    setApproving(true);
+    try {
+      const res = await approvePegTokens() as { alreadyApproved: boolean };
+      toast.success(res.alreadyApproved ? 'Already approved' : 'Tokens approved ✓');
+    } catch (e: unknown) {
+      toast.error((e as Error).message ?? 'Approval failed');
+    }
+    setApproving(false);
+  }
+
+  const stables = [
+    ['USDC', CHAIN_TOKENS[s.chain].usdc.address],
+    ['USDT', CHAIN_TOKENS[s.chain].usdt.address],
+    [CHAIN_TOKENS[s.chain].wNative.symbol, CHAIN_TOKENS[s.chain].wNative.address],
+  ] as [string, string][];
 
   return (
-    <form onSubmit={e => { e.preventDefault(); onSave(s); }} className="mt-4 space-y-4">
+    <form onSubmit={e => { e.preventDefault(); onSave(s); }} className="card space-y-4">
+      <p className="font-semibold text-zinc-100 text-sm">Setup</p>
 
-      {/* Chain selector */}
-      <div>
-        <p className="text-xs text-zinc-500 mb-2">Chain</p>
-        <div className="flex gap-2">
-          {(['bsc', 'ethereum', 'solana'] as PegChain[]).map(c => (
-            <button key={c} type="button" onClick={() => switchChain(c)}
-              className={clsx('flex-1 py-2.5 rounded-xl text-sm font-medium border transition-colors',
-                s.chain === c
-                  ? 'border-brand-500 bg-brand-500/10 text-brand-400'
-                  : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
-              {c === 'bsc' ? 'BSC' : c === 'ethereum' ? 'ETH' : 'Solana'}
-            </button>
-          ))}
-        </div>
+      {/* Chain */}
+      <div className="flex gap-2">
+        {(['bsc', 'ethereum', 'solana'] as PegChain[]).map(c => (
+          <button key={c} type="button" onClick={() => switchChain(c)}
+            className={clsx('flex-1 py-2 rounded-xl text-xs font-medium border transition-colors',
+              s.chain === c
+                ? 'border-brand-500 bg-brand-500/10 text-brand-400'
+                : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
+            {c === 'bsc' ? 'BSC' : c === 'ethereum' ? 'ETH' : 'Solana'}
+          </button>
+        ))}
       </div>
 
-      {/* Token addresses */}
-      <div className="space-y-3">
-        <div>
-          <label className="block text-xs text-zinc-400 mb-1.5">
-            {s.chain === 'solana' ? 'Token Mint' : 'Token Contract'}
-          </label>
-          <input className="input font-mono text-xs" placeholder={s.chain === 'solana' ? 'base58…' : '0x…'}
-            value={s.tokenAddress} onChange={str('tokenAddress')} />
-        </div>
+      {/* Token address + live balance check */}
+      <div>
+        <label className="block text-xs text-zinc-400 mb-1.5">
+          {s.chain === 'solana' ? 'Token Mint' : 'Token Contract'}
+        </label>
+        <input className="input font-mono text-xs"
+          placeholder={s.chain === 'solana' ? 'base58 mint address…' : '0x token contract…'}
+          value={s.tokenAddress} onChange={str('tokenAddress')} />
 
-        <div>
-          <label className="block text-xs text-zinc-400 mb-1.5">
-            {s.chain === 'solana' ? 'Stable Mint' : 'Stablecoin Contract'}
-            <span className="text-zinc-600 ml-1">— any token supported</span>
-          </label>
-          <div className="space-y-2">
-            {/* Quick-select: USDC, USDT, wrapped native for all chains */}
-            <div className="flex gap-2 flex-wrap">
-              {([
-                ['USDC', CHAIN_TOKENS[s.chain].usdc.address],
-                ['USDT', CHAIN_TOKENS[s.chain].usdt.address],
-                [CHAIN_TOKENS[s.chain].wNative.symbol, CHAIN_TOKENS[s.chain].wNative.address],
-              ] as [string, string][]).map(([label, addr]) => (
-                <button key={label} type="button"
-                  onClick={() => setS(p => ({ ...p, stableAddress: addr }))}
-                  className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
-                    s.stableAddress === addr
-                      ? 'border-brand-500 bg-brand-500/10 text-brand-400'
-                      : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
-                  {label}
-                </button>
-              ))}
+        {/* Checking indicator */}
+        {checking && (
+          <p className="mt-1.5 text-xs text-zinc-500">Checking bot balance…</p>
+        )}
+
+        {/* Balance found */}
+        {!checking && tokenInfo && !hasNoTokenBalance && (
+          <p className="mt-1.5 text-xs text-brand-400">
+            Bot holds: {parseFloat(tokenInfo.balance).toLocaleString()} {tokenInfo.symbol}
+          </p>
+        )}
+
+        {/* Insufficient balance warning */}
+        {!checking && hasNoTokenBalance && tokenInfo && (
+          <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/8 p-3 space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-medium text-amber-300">
+                  Bot has no {tokenInfo.symbol} — send tokens to proceed
+                </p>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  The bot needs {tokenInfo.symbol} in its wallet to create the liquidity pool and trade.
+                </p>
+              </div>
             </div>
-            <input className="input font-mono text-xs"
-              placeholder={s.chain === 'solana' ? 'Any mint address…' : 'Any token address (0x…)'}
-              value={s.stableAddress} onChange={str('stableAddress')} />
-          </div>
-        </div>
-
-        {isEvm && (
-          <div>
-            <label className="block text-xs text-zinc-400 mb-1.5">
-              DEX Pair Address
-              <span className="text-zinc-600 ml-1">(auto-filled via Pool section)</span>
-            </label>
-            <input className="input font-mono text-xs" placeholder="0x…"
-              value={s.pairAddress} onChange={str('pairAddress')} />
+            <div className="flex items-center gap-2 bg-zinc-900/60 rounded-lg px-2.5 py-2">
+              <span className="text-xs font-mono text-zinc-300 flex-1 break-all">{tokenInfo.botAddress}</span>
+              <CopyBtn text={tokenInfo.botAddress} />
+            </div>
+            <p className="text-xs text-zinc-600">
+              After sending, wait for confirmation then proceed.
+            </p>
           </div>
         )}
       </div>
 
-      {/* Safety limits — collapsible */}
+      {/* Stable / pair token */}
+      <div>
+        <label className="block text-xs text-zinc-400 mb-1.5">Paired With</label>
+        <div className="flex gap-2 flex-wrap mb-2">
+          {stables.map(([label, addr]) => (
+            <button key={label} type="button" onClick={() => setS(p => ({ ...p, stableAddress: addr }))}
+              className={clsx('px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                s.stableAddress === addr
+                  ? 'border-brand-500 bg-brand-500/10 text-brand-400'
+                  : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <input className="input font-mono text-xs"
+          placeholder={s.chain === 'solana' ? 'Any mint address…' : 'Any ERC-20 address…'}
+          value={s.stableAddress} onChange={str('stableAddress')} />
+      </div>
+
+      {/* Pair address (EVM) */}
+      {isEvm && (
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs text-zinc-400">Pair Address</label>
+            {!s.pairAddress && (
+              <button type="button" onClick={onPoolNeeded}
+                className="text-xs text-brand-400 hover:text-brand-300 transition-colors">
+                Set up pool ↓
+              </button>
+            )}
+          </div>
+          <input className="input font-mono text-xs" placeholder="0x… (set via Pool section below)"
+            value={s.pairAddress} onChange={str('pairAddress')} />
+        </div>
+      )}
+
+      {/* Target price */}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-zinc-400 mb-1.5">Target Price ($)</label>
+          <input type="number" step="0.000001" className="input"
+            value={s.targetPeg} onChange={num('targetPeg')} />
+        </div>
+        <div>
+          <label className="block text-xs text-zinc-400 mb-1.5">Band (±%)</label>
+          <input type="number" step="0.001" className="input"
+            value={s.upperBand} onChange={num('upperBand')} />
+        </div>
+      </div>
+
+      {/* Approve tokens (EVM only, shown when pair is set) */}
+      {isEvm && s.tokenAddress && s.stableAddress && (
+        <button type="button" onClick={handleApprove} disabled={approving}
+          className="btn-ghost w-full text-sm disabled:opacity-40">
+          {approving ? 'Approving…' : 'Approve Tokens for Router'}
+        </button>
+      )}
+
+      {/* Advanced limits (collapsed) */}
       <div className="border border-zinc-800 rounded-xl overflow-hidden">
-        <button type="button" onClick={onToggleLimits}
+        <button type="button" onClick={() => setLimitsOpen(v => !v)}
           className="flex items-center justify-between w-full px-4 py-3 text-xs text-zinc-500 font-medium">
-          Safety Limits
+          Advanced Limits
           {limitsOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
         </button>
         {limitsOpen && (
           <div className="px-4 pb-4 grid grid-cols-2 gap-3 border-t border-zinc-800">
             {([
-              ['Target ($)',        'targetPeg',          '0.0001'],
-              ['Upper band',        'upperBand',          '0.001'],
-              ['Lower band',        'lowerBand',          '0.001'],
-              ['Max trade (tokens)','maxTradeSizeTokens', '1'],
-              ['Daily limit ($)',   'maxDailySpendUsd',   '1'],
-              ['Min liquidity ($)', 'minLiquidityUsd',    '100'],
-              ['Cooldown (s)',      'cooldownSeconds',    '1'],
-              ['Slippage',          'slippageTolerance',  '0.001'],
+              ['Max trade (tokens)',  'maxTradeSizeTokens',  '1'],
+              ['Daily limit ($)',     'maxDailySpendUsd',    '1'],
+              ['Min liquidity ($)',   'minLiquidityUsd',     '100'],
+              ['Cooldown (s)',        'cooldownSeconds',     '1'],
+              ['Slippage',           'slippageTolerance',   '0.001'],
+              ['Lower band',         'lowerBand',           '0.001'],
             ] as [string, keyof PegSettings, string][]).map(([label, key, step]) => (
               <div key={key} className="pt-3">
                 <label className="block text-xs text-zinc-500 mb-1">{label}</label>
-                <input type="number" step={step} value={s[key] as number}
-                  onChange={num(key)} className="input" />
+                <input type="number" step={step} value={s[key] as number} onChange={num(key)} className="input" />
               </div>
             ))}
           </div>
         )}
       </div>
 
-      <button type="submit" className="btn-primary w-full">Save Settings</button>
+      <button type="submit" className="btn-primary w-full">Save</button>
     </form>
   );
 }
@@ -647,11 +581,11 @@ function PoolSection({
   onChainChanged: (chain: PegChain) => Promise<void>;
   onPairUpdated: (pair: string) => void;
 }) {
-  const [busy,       setBusy]       = useState(false);
-  const [tokenAmt,   setTokenAmt]   = useState('');
-  const [stableAmt,  setStableAmt]  = useState('');
-  const [poolId,     setPoolId]     = useState(settings.pairAddress ?? '');
-  const [result,     setResult]     = useState<{ pairAddress: string; isNewPair: boolean; liquidityTxHash: string } | null>(null);
+  const [busy,      setBusy]      = useState(false);
+  const [tokenAmt,  setTokenAmt]  = useState('');
+  const [stableAmt, setStableAmt] = useState('');
+  const [poolId,    setPoolId]    = useState(settings.pairAddress ?? '');
+  const [result,    setResult]    = useState<{ pairAddress: string; isNewPair: boolean; liquidityTxHash: string } | null>(null);
 
   const chain = settings.chain;
   const isEvm = chain === 'bsc' || chain === 'ethereum';
@@ -659,17 +593,18 @@ function PoolSection({
   const openingPrice = parseFloat(tokenAmt) > 0 && parseFloat(stableAmt) > 0
     ? (parseFloat(stableAmt) / parseFloat(tokenAmt)).toFixed(8) : null;
 
+  const canCreate = !!(settings.tokenAddress && settings.stableAddress && (isEvm ? settings.routerAddress : true));
+
   async function handleFind() {
     setBusy(true);
     try {
-      const res = await findPegPair();
+      const res = await findPegPair() as { found: boolean; pairAddress: string };
       if (res.found) {
-        const id = res.pairAddress === 'FOUND_VIA_JUPITER' ? 'Found via Jupiter' : res.pairAddress;
         onPairUpdated(res.pairAddress);
-        setPoolId(id);
-        toast.success(chain === 'solana' ? 'Pool found on Jupiter/Raydium' : `Pair found: ${id.slice(0, 10)}…`);
+        setPoolId(res.pairAddress);
+        toast.success(chain === 'solana' ? 'Pool found on Raydium' : `Pair found`);
       } else {
-        toast('No existing pool found — create one below', { icon: 'ℹ️' });
+        toast('No existing pool — create one below', { icon: 'ℹ️' });
       }
     } catch (e: unknown) { toast.error((e as Error).message ?? 'Error'); }
     setBusy(false);
@@ -680,28 +615,20 @@ function PoolSection({
     if (!ta || !sa) { toast.error('Enter both amounts'); return; }
     setBusy(true);
     try {
-      const res = await initPool(ta, sa);
-      onPairUpdated(res.pairAddress);
-      setPoolId(res.pairAddress);
+      const res = await initPool(ta, sa) as typeof result;
+      onPairUpdated(res!.pairAddress);
+      setPoolId(res!.pairAddress);
       setResult(res);
-      toast.success(res.isNewPair ? 'Pool created & liquidity added!' : 'Liquidity added!');
+      toast.success(res!.isNewPair ? 'Pool created & liquidity added!' : 'Liquidity added!');
     } catch (e: unknown) { toast.error((e as Error).message ?? 'Failed'); }
     setBusy(false);
   }
 
-  const canCreate = settings.tokenAddress && settings.stableAddress
-    && (isEvm ? !!settings.routerAddress : true);
-
   return (
     <div className="mt-4 space-y-4">
-
-      {/* Chain / DEX selector */}
+      {/* Chain tabs */}
       <div className="flex gap-2">
-        {([
-          ['bsc',      'PancakeSwap V2'],
-          ['ethereum', 'Uniswap V2'],
-          ['solana',   'Raydium CPMM'],
-        ] as [PegChain, string][]).map(([c, label]) => (
+        {([['bsc', 'PancakeSwap'], ['ethereum', 'Uniswap V2'], ['solana', 'Raydium']] as [PegChain, string][]).map(([c, label]) => (
           <button key={c} type="button"
             onClick={async () => { if (c !== chain) { setBusy(true); await onChainChanged(c); setPoolId(''); setResult(null); setBusy(false); } }}
             className={clsx('flex-1 py-2 rounded-xl text-xs font-medium border transition-colors',
@@ -713,66 +640,35 @@ function PoolSection({
         ))}
       </div>
 
-      {/* DEX info badge */}
-      <div className="surface grid grid-cols-3 gap-3">
-        <div className="text-xs">
-          <p className="text-zinc-500">DEX</p>
-          <p className="text-zinc-200 font-medium mt-0.5">{DEX_NAME[chain]}</p>
+      {/* Pool info */}
+      {(poolId && poolId !== 'FOUND_VIA_JUPITER') ? (
+        <div className="surface flex items-center gap-2">
+          <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
+          <span className="text-xs text-zinc-400 font-mono flex-1 break-all">{poolId}</span>
+          <CopyBtn text={poolId} />
         </div>
-        <div className="text-xs">
-          <p className="text-zinc-500">Router</p>
-          {chain === 'solana' ? (
-            <p className="text-zinc-500 mt-0.5 italic">Jupiter-routed</p>
-          ) : (
-            <p className="font-mono text-zinc-400 mt-0.5 truncate"
-               title={CHAIN_TOKENS[chain].router}>
-              {CHAIN_TOKENS[chain].router.slice(0, 10)}…
-            </p>
-          )}
-        </div>
-        <div className="text-xs text-right">
-          <p className="text-zinc-500">Pool / Pair</p>
-          {poolId && poolId !== 'FOUND_VIA_JUPITER' ? (
-            <p className="font-mono text-brand-400 mt-0.5">{poolId.slice(0, 10)}…</p>
-          ) : (
-            <p className="text-amber-400 mt-0.5">{poolId === 'FOUND_VIA_JUPITER' ? '✓ Found' : 'Not set'}</p>
-          )}
-        </div>
-      </div>
-
-      {/* Solana note */}
-      {chain === 'solana' && (
-        <div className="surface text-xs text-zinc-400 space-y-1">
-          <p className="font-medium text-zinc-200">Raydium CPMM (Jupiter-routed)</p>
-          <p className="text-zinc-500">Creates a Raydium Constant Product pool. Jupiter automatically routes swaps through it once seeded.</p>
-        </div>
+      ) : (
+        <button onClick={handleFind} disabled={busy || !settings.tokenAddress || !settings.stableAddress}
+          className="btn-ghost w-full text-sm disabled:opacity-40">
+          <Search className="h-4 w-4" />
+          {busy ? 'Searching…' : chain === 'solana' ? 'Find pool on Raydium' : 'Find existing pair'}
+        </button>
       )}
 
-      {/* Find existing */}
-      <button onClick={handleFind}
-        disabled={busy || !settings.tokenAddress || !settings.stableAddress}
-        className="btn-ghost w-full text-sm disabled:opacity-40">
-        <Search className="h-4 w-4" />
-        {busy ? 'Searching…' : chain === 'solana' ? 'Check if pool exists on Jupiter' : 'Find existing pair on-chain'}
-      </button>
-
-      {/* Add liquidity form */}
+      {/* Add / Create liquidity */}
       <div className="space-y-3">
         <p className="text-xs text-zinc-500 font-medium">
-          {settings.pairAddress && settings.pairAddress !== 'FOUND_VIA_JUPITER'
-            ? 'Add more liquidity'
-            : chain === 'solana' ? 'Create Raydium CPMM pool' : `Create ${DEX_NAME[chain]} pair`}
+          {poolId ? 'Add more liquidity' : `Create ${chain === 'solana' ? 'Raydium pool' : `${DEX[chain]} pair`}`}
         </p>
-
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-zinc-400 mb-1.5">Token amount</label>
-            <input type="number" min="0" step="any" placeholder="e.g. 1 000 000"
+            <input type="number" min="0" step="any" placeholder="e.g. 1000000"
               value={tokenAmt} onChange={e => setTokenAmt(e.target.value)} className="input" />
           </div>
           <div>
             <label className="block text-xs text-zinc-400 mb-1.5">Stable amount</label>
-            <input type="number" min="0" step="any" placeholder="e.g. 1 000"
+            <input type="number" min="0" step="any" placeholder="e.g. 1000"
               value={stableAmt} onChange={e => setStableAmt(e.target.value)} className="input" />
           </div>
         </div>
@@ -786,30 +682,24 @@ function PoolSection({
 
         <button onClick={handleInit} disabled={busy || !canCreate || !tokenAmt || !stableAmt}
           className="btn-primary w-full disabled:opacity-40">
-          {busy ? 'Sending transactions…'
-            : settings.pairAddress ? 'Add Liquidity'
-            : chain === 'solana' ? 'Create Raydium Pool & Add Liquidity'
-            : `Create ${DEX_NAME[chain]} Pair & Add Liquidity`}
+          {busy ? 'Sending…' : poolId ? 'Add Liquidity' : 'Create Pool & Add Liquidity'}
         </button>
 
         {!canCreate && (
-          <p className="text-xs text-center text-amber-400">
-            {isEvm ? 'Set token, stable, and router addresses in Setup first'
-                   : 'Set token and stable mint addresses in Setup first'}
-          </p>
+          <p className="text-xs text-center text-amber-400">Complete Setup (token + stable) first</p>
         )}
       </div>
 
-      {/* Result */}
+      {/* Tx result */}
       {result && (
-        <div className="surface space-y-2 text-xs border border-brand-500/20">
-          <p className="text-brand-400 font-medium">
+        <div className="surface border border-brand-500/20 space-y-1.5">
+          <p className="text-xs text-brand-400 font-medium">
             {result.isNewPair ? '✓ Pool created & liquidity added' : '✓ Liquidity added'}
           </p>
-          <p className="font-mono text-zinc-400 break-all">{result.pairAddress}</p>
-          {result.liquidityTxHash && result.pairAddress !== result.liquidityTxHash && (
+          <p className="text-xs font-mono text-zinc-500 break-all">{result.pairAddress}</p>
+          {result.liquidityTxHash && result.liquidityTxHash !== result.pairAddress && (
             <a href={EXPLORER[chain](result.liquidityTxHash)} target="_blank" rel="noreferrer"
-              className="flex items-center gap-1 text-zinc-500 hover:text-zinc-200">
+              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-200">
               View transaction <ExternalLink className="h-3 w-3" />
             </a>
           )}
