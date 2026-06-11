@@ -4,13 +4,12 @@ import toast from 'react-hot-toast';
 import {
   getPegStatus, getPegConfig, updatePegConfig,
   startBot, stopBot, pauseBot, resumeBot, getTradeHistory,
-  findPegPair, initPool, getPegAllowances, approveToken, approveStable,
 } from '@/lib/api';
 import { useSSE } from '@/hooks/useSSE';
 import {
   Play, Square, Pause, RotateCcw, CheckCircle, XCircle,
   Clock, ExternalLink, Copy, Check, AlertCircle, Loader2,
-  ChevronDown, ChevronUp, Search, Droplets,
+  ChevronDown, ChevronUp,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { CHAIN_TOKENS } from '@/lib/tokens';
@@ -21,7 +20,28 @@ interface PegStatus {
   state: string; chain: PegChain; currentPrice: number | null; targetPeg: number;
   upperBound: number; lowerBound: number; liquidityUsd: number | null;
   lastUpdated: string | null;
+  // Pool reserves (on-chain from pair contract)
+  tokenReserve:  number | null;
+  stableReserve: number | null;
+  tokenSymbol:   string | null;
+  stableSymbol:  string | null;
+  blockNumber:   number | null;
+  // Bot wallet
+  botTokenBalance:  number | null;
+  botStableBalance: number | null;
+  botNativeBalance: number | null;
+  nativeSymbol: string | null;
+  // Trading state
+  dailySpendUsd:    number;
+  maxDailySpendUsd: number;
+  cooldownRemaining: number;
+  lastTradeAt: string | null;
   dailyStats: { totalTrades: number; totalBuyUsd: number; totalSellTokens: number };
+  // CoinGecko market data
+  marketPriceUsd: number | null;
+  cgChange24h:    number | null;
+  cgVolume24h:    number | null;
+  cgMarketCap:    number | null;
 }
 interface PegSettings {
   chain: PegChain; tokenAddress: string; stableAddress: string; pairAddress: string; routerAddress: string;
@@ -51,6 +71,23 @@ const STATE_DOT: Record<string, string> = {
 const CHAIN_BADGE: Record<PegChain, string> = {
   bsc: 'badge-yellow', ethereum: 'badge-blue', solana: 'badge-purple',
 };
+
+function timeAgo(ts: string): string {
+  const sec = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (sec < 5)   return 'just now';
+  if (sec < 60)  return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  return `${Math.floor(sec / 3600)}h ago`;
+}
+function fmtDuration(sec: number): string {
+  if (sec <= 0)  return 'ready';
+  if (sec < 60)  return `${Math.ceil(sec)}s`;
+  return `${Math.floor(sec / 60)}m ${Math.ceil(sec % 60)}s`;
+}
+function fmtNum(n: number | null | undefined, decimals = 2): string {
+  if (n == null) return '—';
+  return n.toLocaleString(undefined, { maximumFractionDigits: decimals });
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function CopyBtn({ text }: { text: string }) {
@@ -158,6 +195,15 @@ export default function PegPage() {
   const [busy,     setBusy]     = useState(false);
   const { on } = useSSE();
 
+  // Cooldown countdown — ticks every second when cooldownRemaining > 0
+  const [cooldown, setCooldown] = useState(0);
+  useEffect(() => {
+    if (!status?.cooldownRemaining) { setCooldown(0); return; }
+    setCooldown(status.cooldownRemaining);
+    const iv = setInterval(() => setCooldown(s => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(iv);
+  }, [status?.cooldownRemaining]);
+
   const refresh = useCallback(async () => {
     const [s, cfg, t] = await Promise.allSettled([getPegStatus(), getPegConfig(), getTradeHistory(20)]);
     if (cfg.status === 'fulfilled') setSettings(cfg.value as PegSettings);
@@ -170,13 +216,34 @@ export default function PegPage() {
 
   useEffect(() => {
     const o1 = on('PRICE_UPDATE', (d: unknown) => {
-      const snap = d as { price: number; liquidityUsd: number; timestamp: string };
-      setStatus(p => p ? { ...p, currentPrice: snap.price, liquidityUsd: snap.liquidityUsd, lastUpdated: snap.timestamp } : p);
+      const snap = d as {
+        price: number; liquidityUsd: number; timestamp: string;
+        tokenReserve: number; stableReserve: number;
+        tokenSymbol: string; stableSymbol: string; blockNumber: number;
+        marketPriceUsd: number | null; cgChange24h: number | null;
+        cgVolume24h: number | null; cgMarketCap: number | null;
+      };
+      setStatus(p => p ? {
+        ...p,
+        currentPrice:   snap.price,
+        liquidityUsd:   snap.liquidityUsd,
+        lastUpdated:    snap.timestamp,
+        tokenReserve:   snap.tokenReserve,
+        stableReserve:  snap.stableReserve,
+        tokenSymbol:    snap.tokenSymbol  || p.tokenSymbol,
+        stableSymbol:   snap.stableSymbol || p.stableSymbol,
+        blockNumber:    snap.blockNumber,
+        marketPriceUsd: snap.marketPriceUsd,
+        cgChange24h:    snap.cgChange24h,
+        cgVolume24h:    snap.cgVolume24h,
+        cgMarketCap:    snap.cgMarketCap,
+      } : p);
     });
     const o2 = on('BOT_STATE', (d: unknown) => {
       const s = d as { state: string; settings: PegSettings };
+      // Only update bot state/chain — never overwrite settings from SSE while the form may be dirty.
+      // The save flow calls setSettings() directly after updatePegConfig() resolves.
       setStatus(p => p ? { ...p, state: s.state, chain: s.settings.chain } : p);
-      setSettings(s.settings);
     });
     const o3 = on('TRADE', (d: unknown) => { setTrades(p => [d as Trade, ...p].slice(0, 20)); refresh(); });
     return () => { o1(); o2(); o3(); };
@@ -189,7 +256,7 @@ export default function PegPage() {
     setBusy(false);
   }
 
-  async function saveSettings(s: PegSettings) {
+  async function saveSettings(s: PegSettings): Promise<void> {
     try { await updatePegConfig(s as unknown as Record<string, number | string>); setSettings(s); toast.success('Saved'); }
     catch (e: unknown) { toast.error((e as Error).message ?? 'Failed'); }
   }
@@ -211,11 +278,30 @@ export default function PegPage() {
     );
   }
 
+  const tokSym  = status?.tokenSymbol  || settings?.tokenAddress?.slice(0, 6) || 'Token';
+  const stbSym  = status?.stableSymbol || settings?.stableAddress?.slice(0, 6) || 'Stable';
+  const natSym  = status?.nativeSymbol ?? (chain === 'bsc' ? 'BNB' : 'ETH');
+
+  // Budget percentage
+  const dailyPct = status && status.maxDailySpendUsd > 0
+    ? Math.min(100, (status.dailySpendUsd / status.maxDailySpendUsd) * 100)
+    : 0;
+
+  // What would bot do right now?
+  let botAction: { label: string; color: string } | null = null;
+  if (price != null && status) {
+    if (price > status.upperBound) botAction = { label: `Price HIGH — would sell ${tokSym}`, color: 'text-red-400' };
+    else if (price < status.lowerBound) botAction = { label: `Price LOW — would buy ${tokSym}`, color: 'text-brand-400' };
+    else botAction = { label: 'Price in range — holding', color: 'text-zinc-500' };
+  }
+
   return (
     <div className="page">
 
       {/* ── BOT STATUS ─────────────────────────────────── */}
-      <div className="card">
+      <div className="card space-y-4">
+
+        {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className={clsx('h-2 w-2 rounded-full shrink-0', STATE_DOT[state])} />
@@ -224,23 +310,81 @@ export default function PegPage() {
               {chain === 'bsc' ? 'BSC' : chain === 'ethereum' ? 'ETH' : 'SOL'} · {DEX[chain]}
             </span>
           </div>
-          {price != null ? (
-            <div className="text-right">
-              <p className="text-xl font-bold font-mono text-zinc-50 leading-none">${price.toFixed(6)}</p>
-              <p className={clsx('text-xs mt-0.5 font-medium', inRange ? 'text-brand-400' : 'text-amber-400')}>
-                {dev != null ? `${dev >= 0 ? '▲' : '▼'} ${Math.abs(dev).toFixed(3)}% from peg` : ''}
-              </p>
-            </div>
-          ) : (
-            <p className="text-sm text-zinc-600">No price data</p>
-          )}
+          {status?.blockNumber ? (
+            <span className="text-xs text-zinc-600 font-mono">#{status.blockNumber.toLocaleString()}</span>
+          ) : null}
         </div>
 
+        {/* Price + deviation */}
+        {price != null ? (
+          <div>
+            <div className="flex items-end justify-between">
+              <div>
+                <p className="text-xs text-zinc-600 mb-1">DEX Price (pair contract)</p>
+                <p className="text-3xl font-bold font-mono text-zinc-50 leading-none">${price.toFixed(6)}</p>
+                <p className={clsx('text-xs mt-1.5 font-medium flex items-center gap-1.5',
+                  inRange ? 'text-brand-400' : 'text-amber-400')}>
+                  {dev != null && (
+                    <>{dev >= 0 ? '▲' : '▼'} {Math.abs(dev).toFixed(3)}% {dev >= 0 ? 'above' : 'below'} peg</>
+                  )}
+                </p>
+                {botAction && state !== 'STOPPED' && (
+                  <p className={clsx('text-xs mt-0.5', botAction.color)}>{botAction.label}</p>
+                )}
+              </div>
+              <div className="text-right text-xs text-zinc-600">
+                <p>target ${target.toFixed(6)}</p>
+                {status?.lastUpdated && <p>{timeAgo(status.lastUpdated)}</p>}
+              </div>
+            </div>
+
+            {/* CoinGecko market data row */}
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2.5">
+                <p className="text-xs text-zinc-600 mb-0.5">Market Price (CoinGecko)</p>
+                {status?.marketPriceUsd != null ? (
+                  <p className="text-sm font-mono font-semibold text-zinc-100">
+                    ${status.marketPriceUsd.toFixed(6)}
+                  </p>
+                ) : (
+                  <p className="text-sm text-zinc-600">Not listed</p>
+                )}
+                {status?.marketPriceUsd != null && price > 0 && (
+                  <p className={clsx('text-xs mt-0.5',
+                    status.marketPriceUsd > price ? 'text-amber-400' : 'text-brand-400')}>
+                    {(((price - status.marketPriceUsd) / status.marketPriceUsd) * 100).toFixed(3)}% vs market
+                  </p>
+                )}
+              </div>
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2.5">
+                <p className="text-xs text-zinc-600 mb-0.5">24h Change</p>
+                {status?.cgChange24h != null ? (
+                  <p className={clsx('text-sm font-mono font-semibold',
+                    status.cgChange24h >= 0 ? 'text-brand-400' : 'text-red-400')}>
+                    {status.cgChange24h >= 0 ? '+' : ''}{status.cgChange24h.toFixed(2)}%
+                  </p>
+                ) : (
+                  <p className="text-sm text-zinc-600">—</p>
+                )}
+                {status?.cgVolume24h != null && (
+                  <p className="text-xs text-zinc-600 mt-0.5">
+                    Vol: ${(status.cgVolume24h / 1000).toFixed(0)}k
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-600">
+            {readyToRun ? 'Fetching on-chain price…' : 'Configure pair address to see live price'}
+          </p>
+        )}
+
         {/* Range bar */}
-        {status && price != null && (
-          <div className="mt-3">
+        {price != null && status && (
+          <div>
             <div className="h-1.5 bg-zinc-800 rounded-full relative overflow-hidden">
-              <div className="absolute inset-y-0 left-[25%] right-[25%] bg-brand-500/15 rounded-full" />
+              <div className="absolute inset-y-0 left-[20%] right-[20%] bg-brand-500/15 rounded-full" />
               <div
                 className={clsx('absolute top-0 bottom-0 w-2 rounded-full transition-all duration-500',
                   inRange ? 'bg-brand-400' : 'bg-amber-400')}
@@ -255,8 +399,96 @@ export default function PegPage() {
           </div>
         )}
 
+        {/* Pool reserves */}
+        {(status?.tokenReserve != null || status?.stableReserve != null) && (
+          <div className="pt-3 border-t border-zinc-800/60">
+            <p className="text-xs text-zinc-600 font-medium mb-2 uppercase tracking-wide">Pool Reserves</p>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2.5">
+                <p className="text-xs text-zinc-500 mb-0.5">{tokSym}</p>
+                <p className="text-sm font-mono font-semibold text-zinc-100">
+                  {fmtNum(status.tokenReserve)}
+                </p>
+              </div>
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2.5">
+                <p className="text-xs text-zinc-500 mb-0.5">{stbSym}</p>
+                <p className="text-sm font-mono font-semibold text-zinc-100">
+                  {fmtNum(status.stableReserve)}
+                </p>
+              </div>
+            </div>
+            {status.liquidityUsd != null && (
+              <div className="flex items-center justify-between mt-2 px-1">
+                <span className="text-xs text-zinc-600">Total liquidity</span>
+                <span className="text-xs font-semibold text-zinc-300">
+                  ${status.liquidityUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Bot wallet */}
+        {(status?.botTokenBalance != null || status?.botStableBalance != null || status?.botNativeBalance != null) && (
+          <div className="pt-3 border-t border-zinc-800/60">
+            <p className="text-xs text-zinc-600 font-medium mb-2 uppercase tracking-wide">Bot Wallet</p>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-2 py-2.5">
+                <p className="text-xs text-zinc-500 mb-0.5">{tokSym}</p>
+                <p className={clsx('text-sm font-semibold font-mono',
+                  (status.botTokenBalance ?? 0) > 0 ? 'text-zinc-100' : 'text-amber-400')}>
+                  {fmtNum(status.botTokenBalance)}
+                </p>
+              </div>
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-2 py-2.5">
+                <p className="text-xs text-zinc-500 mb-0.5">{stbSym}</p>
+                <p className={clsx('text-sm font-semibold font-mono',
+                  (status.botStableBalance ?? 0) > 0 ? 'text-zinc-100' : 'text-amber-400')}>
+                  {fmtNum(status.botStableBalance)}
+                </p>
+              </div>
+              <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-2 py-2.5">
+                <p className="text-xs text-zinc-500 mb-0.5">{natSym} (gas)</p>
+                <p className={clsx('text-sm font-semibold font-mono',
+                  (status.botNativeBalance ?? 0) > 0.001 ? 'text-zinc-100' : 'text-red-400')}>
+                  {status.botNativeBalance != null ? status.botNativeBalance.toFixed(4) : '—'}
+                </p>
+              </div>
+            </div>
+
+            {/* Daily budget bar */}
+            {(status.maxDailySpendUsd ?? 0) > 0 && (
+              <div className="mt-3">
+                <div className="flex justify-between text-xs text-zinc-600 mb-1.5">
+                  <span>Daily budget</span>
+                  <span>${fmtNum(status.dailySpendUsd)} / ${fmtNum(status.maxDailySpendUsd, 0)} used</span>
+                </div>
+                <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className={clsx('h-full rounded-full transition-all',
+                      dailyPct > 80 ? 'bg-amber-400' : 'bg-brand-500')}
+                    style={{ width: `${dailyPct}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Cooldown */}
+            {cooldown > 0 ? (
+              <p className="text-xs text-amber-400 mt-2 flex items-center gap-1.5">
+                <Clock className="h-3.5 w-3.5" />
+                Next trade in {fmtDuration(cooldown)}
+              </p>
+            ) : state === 'AUTO_TRADE' ? (
+              <p className="text-xs text-brand-400 mt-2 flex items-center gap-1.5">
+                <CheckCircle className="h-3.5 w-3.5" /> Ready to trade
+              </p>
+            ) : null}
+          </div>
+        )}
+
         {/* Controls */}
-        <div className="flex gap-2 mt-4">
+        <div className="flex gap-2 pt-1">
           {state === 'STOPPED' && (
             <>
               <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('MONITOR_ONLY'), 'Monitoring started')}
@@ -290,27 +522,25 @@ export default function PegPage() {
             </>
           )}
         </div>
+
         {!readyToRun && state === 'STOPPED' && (
-          <p className="mt-2 text-center text-xs text-zinc-600">Complete setup below to enable trading</p>
+          <p className="text-center text-xs text-zinc-600">Complete setup below to enable trading</p>
         )}
-        {/* Mini stats when running */}
+
+        {/* 24h summary when running */}
         {status && state !== 'STOPPED' && (
-          <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-zinc-800/60 text-center">
+          <div className="grid grid-cols-3 gap-2 pt-3 border-t border-zinc-800/60 text-center">
             <div>
-              <p className="text-xs text-zinc-600">Liquidity</p>
-              <p className="text-sm font-semibold text-zinc-200 mt-0.5">
-                {status.liquidityUsd ? `$${(status.liquidityUsd / 1000).toFixed(1)}k` : '—'}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-zinc-600">24h Trades</p>
+              <p className="text-xs text-zinc-600">24h trades</p>
               <p className="text-sm font-semibold text-zinc-200 mt-0.5">{status.dailyStats.totalTrades}</p>
             </div>
             <div>
-              <p className="text-xs text-zinc-600">Last check</p>
-              <p className="text-sm font-semibold text-zinc-200 mt-0.5">
-                {status.lastUpdated ? new Date(status.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
-              </p>
+              <p className="text-xs text-zinc-600">24h bought</p>
+              <p className="text-sm font-semibold text-zinc-200 mt-0.5">${fmtNum(status.dailyStats.totalBuyUsd)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-zinc-600">24h sold</p>
+              <p className="text-sm font-semibold text-zinc-200 mt-0.5">{fmtNum(status.dailyStats.totalSellTokens)} {tokSym}</p>
             </div>
           </div>
         )}
@@ -321,11 +551,6 @@ export default function PegPage() {
         <PairCard settings={settings} onSave={saveSettings} />
       )}
 
-      {/* ── POOL / LIQUIDITY ───────────────────────────── */}
-      {settings && (
-        <PoolCard settings={settings} onPairUpdated={pair => setSettings(s => s ? { ...s, pairAddress: pair } : s)} />
-      )}
-
       {/* ── RECENT TRADES ──────────────────────────────── */}
       <TradeHistory trades={trades} chain={chain} />
     </div>
@@ -333,14 +558,21 @@ export default function PegPage() {
 }
 
 // ── Pair Setup Card ───────────────────────────────────────────────────────────
-function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: PegSettings) => void }) {
-  const [s, setS]           = useState(settings);
-  const [open, setOpen]     = useState(false);
+function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: PegSettings) => Promise<void> }) {
+  const [s, setS]       = useState(settings);
+  const [open, setOpen] = useState(false);
   const dirty = useRef(false);
 
   useEffect(() => { if (!dirty.current) setS(settings); }, [settings]);
 
-  const str = (k: keyof PegSettings) => (v: string) => { dirty.current = true; setS(p => ({ ...p, [k]: v })); };
+  const str = (k: keyof PegSettings) => (v: string) => {
+    dirty.current = true;
+    if (k === 'tokenAddress' || k === 'stableAddress') {
+      setS(p => ({ ...p, [k]: v, pairAddress: '' }));
+    } else {
+      setS(p => ({ ...p, [k]: v }));
+    }
+  };
   const num = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) => {
     dirty.current = true; setS(p => ({ ...p, [k]: parseFloat(e.target.value) || 0 }));
   };
@@ -358,9 +590,12 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
     [CHAIN_TOKENS[s.chain].wNative.symbol, CHAIN_TOKENS[s.chain].wNative.address],
   ] as [string, string][];
 
+  const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
+  const pairOk = !isEvm || (s.pairAddress.startsWith('0x') && s.pairAddress.length === 42);
+
   return (
-    <form onSubmit={e => { e.preventDefault(); dirty.current = false; onSave(s); }} className="card space-y-4">
-      <p className="font-semibold text-zinc-100 text-sm">Pair Setup</p>
+    <form onSubmit={async (e) => { e.preventDefault(); await onSave(s); dirty.current = false; }} className="card space-y-4">
+      <p className="font-semibold text-zinc-100 text-sm">Bot Setup</p>
 
       <ChainTabs value={s.chain} onChange={switchChain} />
 
@@ -377,7 +612,8 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
         <p className="text-xs text-zinc-500 mb-2 font-medium">Paired With</p>
         <div className="flex gap-2 mb-2">
           {stables.map(([label, addr]) => (
-            <button key={label} type="button" onClick={() => { dirty.current = true; setS(p => ({ ...p, stableAddress: addr })); }}
+            <button key={label} type="button"
+              onClick={() => { dirty.current = true; setS(p => ({ ...p, stableAddress: addr, pairAddress: '' })); }}
               className={clsx('flex-1 py-1.5 rounded-xl text-xs font-semibold border transition-colors',
                 s.stableAddress === addr
                   ? 'border-brand-500 bg-brand-500/10 text-brand-400'
@@ -392,16 +628,32 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
           placeholder={s.chain === 'solana' ? 'Stable mint…' : '0x stable contract…'}
           onChange={str('stableAddress')}
           chain={s.chain}
+          showBalance={false}
         />
       </div>
 
-      {/* Pair address (EVM) */}
-      {(s.chain === 'bsc' || s.chain === 'ethereum') && (
+      {/* Pair address — required for EVM */}
+      {isEvm && (
         <div>
-          <p className="text-xs text-zinc-500 mb-2 font-medium">Pair Address</p>
-          <input className="input font-mono text-xs"
-            placeholder="0x… (set via Pool section below)"
-            value={s.pairAddress} onChange={e => { dirty.current = true; setS(p => ({ ...p, pairAddress: e.target.value })); }} />
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs text-zinc-500 font-medium">
+              DEX Pair Address <span className="text-red-400">*</span>
+            </p>
+            {pairOk && s.pairAddress && (
+              <span className="flex items-center gap-1 text-xs text-brand-400 font-medium">
+                <CheckCircle className="h-3.5 w-3.5" /> Set
+              </span>
+            )}
+          </div>
+          <input
+            className={clsx('input font-mono text-xs', !pairOk && s.pairAddress ? 'border-red-500/50' : '')}
+            placeholder={`Paste your ${DEX[s.chain]} pair address here…`}
+            value={s.pairAddress}
+            onChange={e => { dirty.current = true; setS(p => ({ ...p, pairAddress: e.target.value })); }}
+          />
+          <p className="mt-1.5 text-xs text-zinc-600">
+            Create your pool on {DEX[s.chain]}, then paste the pair address above.
+          </p>
         </div>
       )}
 
@@ -448,298 +700,6 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
   );
 }
 
-// ── Pool Card ─────────────────────────────────────────────────────────────────
-interface Allowances {
-  tokenApproved: boolean; stableApproved: boolean;
-  tokenSymbol: string; stableSymbol: string; solana?: boolean;
-}
-
-function PoolCard({
-  settings, onPairUpdated,
-}: {
-  settings: PegSettings;
-  onPairUpdated: (pair: string) => void;
-}) {
-  const [open,         setOpen]         = useState(!settings.pairAddress);
-  const [busy,         setBusy]         = useState(false);
-  const [approvingTok, setApprovingTok] = useState(false);
-  const [approvingStb, setApprovingStb] = useState(false);
-  const [tokenAmt,     setTokenAmt]     = useState('');
-  const [stableAmt,    setStableAmt]    = useState('');
-  const [allowances,   setAllowances]   = useState<Allowances | null>(null);
-
-  const chain = settings.chain;
-  const isEvm = chain === 'bsc' || chain === 'ethereum';
-
-  // Balance checks
-  const { info: tokenInfo }  = useTokenBalance(settings.tokenAddress, chain);
-  const { info: stableInfo } = useTokenBalance(settings.stableAddress, chain);
-
-  const tokenNeed   = parseFloat(tokenAmt)  || 0;
-  const stableNeed  = parseFloat(stableAmt) || 0;
-  const tokenBal    = parseFloat(tokenInfo?.balance  ?? '0');
-  const stableBal   = parseFloat(stableInfo?.balance ?? '0');
-  const tokenShort  = tokenNeed  > 0 && tokenBal  < tokenNeed;
-  const stableShort = stableNeed > 0 && stableBal < stableNeed;
-  const hasShortfall = tokenShort || stableShort;
-
-  const openingPrice = tokenNeed > 0 && stableNeed > 0
-    ? (stableNeed / tokenNeed).toFixed(8) : null;
-
-  // PancakeSwap rule: both tokens must be approved before Create Pool is enabled
-  const tokenApproved  = !isEvm || (allowances?.solana ?? false) || (allowances?.tokenApproved  ?? false);
-  const stableApproved = !isEvm || (allowances?.solana ?? false) || (allowances?.stableApproved ?? false);
-  const bothApproved   = tokenApproved && stableApproved;
-
-  const canSupply = bothApproved && !!tokenAmt && !!stableAmt && !hasShortfall
-    && !!(settings.tokenAddress && settings.stableAddress);
-
-  // Fetch on-chain allowances
-  const fetchAllowances = useCallback(async () => {
-    if (!isEvm || !settings.tokenAddress || !settings.stableAddress) return;
-    try {
-      const data = await getPegAllowances() as Allowances;
-      setAllowances(data);
-    } catch { /* ignore */ }
-  }, [isEvm, settings.tokenAddress, settings.stableAddress]);
-
-  useEffect(() => { fetchAllowances(); }, [fetchAllowances]);
-
-  async function handleApproveToken() {
-    setApprovingTok(true);
-    try {
-      await approveToken();
-      toast.success(`${allowances?.tokenSymbol ?? 'Token'} approved ✓`);
-      await fetchAllowances();
-    } catch (e: unknown) { toast.error((e as Error).message ?? 'Approval failed'); }
-    setApprovingTok(false);
-  }
-
-  async function handleApproveStable() {
-    setApprovingStb(true);
-    try {
-      await approveStable();
-      toast.success(`${allowances?.stableSymbol ?? 'Stable'} approved ✓`);
-      await fetchAllowances();
-    } catch (e: unknown) { toast.error((e as Error).message ?? 'Approval failed'); }
-    setApprovingStb(false);
-  }
-
-  async function handleFind() {
-    setBusy(true);
-    try {
-      const res = await findPegPair() as { found: boolean; pairAddress: string };
-      if (res.found) { onPairUpdated(res.pairAddress); toast.success('Pair found!'); }
-      else toast('No existing pool found — create one below', { icon: 'ℹ️' });
-    } catch (e: unknown) { toast.error((e as Error).message ?? 'Error'); }
-    setBusy(false);
-  }
-
-  async function handleInit() {
-    if (!tokenNeed || !stableNeed) { toast.error('Enter both amounts'); return; }
-    setBusy(true);
-    try {
-      const res = await initPool(tokenNeed, stableNeed) as { pairAddress: string; isNewPair: boolean };
-      onPairUpdated(res.pairAddress);
-      toast.success(res.isNewPair ? 'Pool created & liquidity added!' : 'Liquidity added!');
-    } catch (e: unknown) { toast.error((e as Error).message ?? 'Failed'); }
-    setBusy(false);
-  }
-
-  return (
-    <div className="card">
-      <button type="button" onClick={() => setOpen(v => !v)}
-        className="flex items-center justify-between w-full">
-        <div className="flex items-center gap-2">
-          <Droplets className="h-4 w-4 text-blue-400" />
-          <span className="font-semibold text-zinc-100 text-sm">Pool Liquidity</span>
-          {settings.pairAddress
-            ? <span className="text-xs text-brand-400 font-medium">✓ Pair set</span>
-            : <span className="badge badge-yellow text-xs">Not set</span>}
-        </div>
-        {open ? <ChevronUp className="h-4 w-4 text-zinc-500" /> : <ChevronDown className="h-4 w-4 text-zinc-500" />}
-      </button>
-
-      {!open && settings.pairAddress && settings.pairAddress !== 'FOUND_VIA_JUPITER' && (
-        <div className="flex items-center gap-2 mt-2">
-          <span className="text-xs font-mono text-zinc-600 flex-1 truncate">{settings.pairAddress}</span>
-          <CopyBtn text={settings.pairAddress} />
-        </div>
-      )}
-
-      {open && (
-        <div className="mt-4 space-y-4">
-
-          {/* Find existing pair */}
-          {!settings.pairAddress ? (
-            <button onClick={handleFind} disabled={busy || !settings.tokenAddress || !settings.stableAddress}
-              className="btn-ghost w-full text-sm disabled:opacity-40">
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-              {busy ? 'Searching…' : chain === 'solana' ? 'Find pool on Raydium' : 'Find existing pair'}
-            </button>
-          ) : (
-            <div className="surface flex items-center gap-2">
-              <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
-              <span className="text-xs font-mono text-zinc-400 flex-1 break-all">{settings.pairAddress}</span>
-              <CopyBtn text={settings.pairAddress} />
-            </div>
-          )}
-
-          {/* Amount inputs */}
-          <div>
-            <p className="text-xs text-zinc-500 font-medium mb-3">
-              {settings.pairAddress ? 'Add Liquidity' : `Create ${DEX[chain]} Pool`}
-            </p>
-
-            {/* Token input */}
-            <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 mb-2">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-zinc-500">
-                  {tokenInfo?.symbol ?? 'Token'} amount
-                </span>
-                {tokenInfo && (
-                  <span className={clsx('text-xs font-medium', tokenShort ? 'text-amber-400' : 'text-zinc-500')}>
-                    Bal: {parseFloat(tokenInfo.balance).toLocaleString()} {tokenInfo.symbol}
-                  </span>
-                )}
-              </div>
-              <input type="number" min="0" step="any" placeholder="0.0"
-                value={tokenAmt} onChange={e => setTokenAmt(e.target.value)}
-                className="w-full bg-transparent text-xl font-bold text-zinc-100 placeholder-zinc-700 outline-none" />
-              {tokenShort && tokenInfo && (
-                <p className="mt-1 text-xs text-amber-400 flex items-center gap-1">
-                  <AlertCircle className="h-3 w-3" />
-                  Need {(tokenNeed - tokenBal).toLocaleString()} more — send to bot
-                </p>
-              )}
-            </div>
-
-            {/* Stable input */}
-            <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-zinc-500">
-                  {stableInfo?.symbol ?? 'Stable'} amount
-                </span>
-                {stableInfo && (
-                  <span className={clsx('text-xs font-medium', stableShort ? 'text-amber-400' : 'text-zinc-500')}>
-                    Bal: {parseFloat(stableInfo.balance).toLocaleString()} {stableInfo.symbol}
-                  </span>
-                )}
-              </div>
-              <input type="number" min="0" step="any" placeholder="0.0"
-                value={stableAmt} onChange={e => setStableAmt(e.target.value)}
-                className="w-full bg-transparent text-xl font-bold text-zinc-100 placeholder-zinc-700 outline-none" />
-              {stableShort && stableInfo && (
-                <p className="mt-1 text-xs text-amber-400 flex items-center gap-1">
-                  <AlertCircle className="h-3 w-3" />
-                  Need {(stableNeed - stableBal).toLocaleString()} more — send to bot
-                </p>
-              )}
-            </div>
-
-            {openingPrice && (
-              <div className="flex items-center justify-between mt-3 px-1">
-                <span className="text-xs text-zinc-600">Opening price</span>
-                <span className="text-sm font-bold font-mono text-brand-400">${openingPrice} / token</span>
-              </div>
-            )}
-          </div>
-
-          {/* Bot wallet shortfall warning */}
-          {hasShortfall && (tokenInfo || stableInfo) && (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/8 p-3 space-y-1.5">
-              <p className="text-xs text-amber-300 font-medium flex items-center gap-1.5">
-                <AlertCircle className="h-4 w-4" /> Insufficient bot balance
-              </p>
-              <div className="flex items-center gap-2 bg-zinc-900/60 rounded-lg px-2.5 py-2">
-                <span className="text-xs font-mono text-zinc-400 flex-1 break-all">
-                  {tokenInfo?.botAddress ?? stableInfo?.botAddress}
-                </span>
-                <CopyBtn text={tokenInfo?.botAddress ?? stableInfo?.botAddress ?? ''} />
-              </div>
-            </div>
-          )}
-
-          {/* ── APPROVAL STEP (EVM only) — PancakeSwap / Uniswap style ── */}
-          {isEvm && settings.tokenAddress && settings.stableAddress && (
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
-              <p className="text-xs font-semibold text-zinc-400">
-                Step 1 — Approve router to spend tokens
-              </p>
-
-              <div className="grid grid-cols-2 gap-2">
-                {/* Token approve */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-1.5">
-                    {tokenApproved
-                      ? <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
-                      : <div className="h-4 w-4 rounded-full border-2 border-zinc-600 shrink-0" />}
-                    <span className="text-xs text-zinc-400 font-medium">
-                      {allowances?.tokenSymbol ?? tokenInfo?.symbol ?? 'Token'}
-                    </span>
-                  </div>
-                  {!tokenApproved && (
-                    <button onClick={handleApproveToken} disabled={approvingTok || approvingStb}
-                      className="btn-ghost w-full text-xs disabled:opacity-40">
-                      {approvingTok
-                        ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Approving…</>
-                        : `Approve ${allowances?.tokenSymbol ?? 'Token'}`}
-                    </button>
-                  )}
-                </div>
-
-                {/* Stable approve */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-1.5">
-                    {stableApproved
-                      ? <CheckCircle className="h-4 w-4 text-brand-400 shrink-0" />
-                      : <div className="h-4 w-4 rounded-full border-2 border-zinc-600 shrink-0" />}
-                    <span className="text-xs text-zinc-400 font-medium">
-                      {allowances?.stableSymbol ?? stableInfo?.symbol ?? 'Stable'}
-                    </span>
-                  </div>
-                  {!stableApproved && (
-                    <button onClick={handleApproveStable} disabled={approvingTok || approvingStb}
-                      className="btn-ghost w-full text-xs disabled:opacity-40">
-                      {approvingStb
-                        ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Approving…</>
-                        : `Approve ${allowances?.stableSymbol ?? 'Stable'}`}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {bothApproved && (
-                <p className="text-xs text-brand-400 font-medium flex items-center gap-1.5">
-                  <CheckCircle className="h-3.5 w-3.5" /> Both tokens approved — ready to supply
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Step 2 — Supply */}
-          <div>
-            <p className="text-xs font-semibold text-zinc-400 mb-2">
-              {isEvm ? 'Step 2 — ' : ''}
-              {settings.pairAddress ? 'Add Liquidity' : `Create ${DEX[chain]} Pool`}
-            </p>
-            <button onClick={handleInit} disabled={busy || !canSupply}
-              className="btn-primary w-full disabled:opacity-40">
-              {busy
-                ? <><Loader2 className="h-4 w-4 animate-spin" /> Sending transaction…</>
-                : <><Droplets className="h-4 w-4" /> {settings.pairAddress ? 'Add Liquidity' : 'Create Pool & Add Liquidity'}</>}
-            </button>
-            {isEvm && !bothApproved && (
-              <p className="text-xs text-center text-zinc-600 mt-2">Approve both tokens above to enable</p>
-            )}
-          </div>
-
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Trade History ─────────────────────────────────────────────────────────────
 function TradeHistory({ trades, chain }: { trades: Trade[]; chain: PegChain }) {
   const [open, setOpen] = useState(true);
@@ -768,9 +728,16 @@ function TradeHistory({ trades, chain }: { trades: Trade[]; chain: PegChain }) {
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-zinc-200 font-medium">{Number(t.token_amount).toFixed(2)} tokens</span>
                       <span className="text-zinc-600">${Number(t.stable_amount).toFixed(4)}</span>
-                      {t.price_after != null && <span className="text-zinc-600">→ ${t.price_after.toFixed(6)}</span>}
+                      {t.price_after != null && (
+                        <span className="text-zinc-600">→ ${t.price_after.toFixed(6)}</span>
+                      )}
                     </div>
-                    <p className="text-xs text-zinc-600 mt-0.5">{new Date(t.timestamp).toLocaleString()}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-xs text-zinc-600">{new Date(t.timestamp).toLocaleString()}</p>
+                      {t.error_message && (
+                        <p className="text-xs text-red-400 truncate">{t.error_message}</p>
+                      )}
+                    </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {t.status === 'SUCCESS' && <CheckCircle className="h-3.5 w-3.5 text-brand-400" />}

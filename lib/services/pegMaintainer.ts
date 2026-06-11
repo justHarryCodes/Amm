@@ -93,8 +93,8 @@ class PegMaintainer extends EventEmitter {
   state: BotState = 'STOPPED';
   settings: PegSettings = initialSettings();
 
-  private lastTradeAt: Date | null = null;
-  private dailySpendUsd = 0;
+  lastTradeAt: Date | null = null;
+  dailySpendUsd = 0;
   private dailySpendResetAt = new Date();
 
   updateSettings(partial: Partial<PegSettings>): void {
@@ -107,6 +107,7 @@ class PegMaintainer extends EventEmitter {
     }
     logger.info('Peg settings updated', { chain: this.settings.chain, token: this.settings.tokenAddress.slice(0, 10) });
     this.emit('stateChange', this.state);
+    void this.saveState();
   }
 
   async start(mode: 'MONITOR_ONLY' | 'AUTO_TRADE'): Promise<void> {
@@ -119,6 +120,7 @@ class PegMaintainer extends EventEmitter {
     priceMonitor.start(this.settings.chain, 15_000);
     logger.info('PegMaintainer started', { mode, chain: this.settings.chain, token: this.settings.tokenAddress.slice(0, 10) });
     this.emit('stateChange', this.state);
+    void this.saveState();
   }
 
   stop(): void {
@@ -127,6 +129,7 @@ class PegMaintainer extends EventEmitter {
     priceMonitor.stop();
     logger.info('PegMaintainer stopped');
     this.emit('stateChange', this.state);
+    void this.saveState();
   }
 
   pause(): void {
@@ -134,6 +137,7 @@ class PegMaintainer extends EventEmitter {
     this.state = 'PAUSED';
     logger.warn('PegMaintainer PAUSED');
     this.emit('stateChange', this.state);
+    void this.saveState();
   }
 
   resume(): void {
@@ -141,6 +145,43 @@ class PegMaintainer extends EventEmitter {
     this.state = 'AUTO_TRADE';
     logger.info('PegMaintainer resumed');
     this.emit('stateChange', this.state);
+    void this.saveState();
+  }
+
+  // Persist current mode + settings to DB so the bot can auto-resume after a server restart
+  private async saveState(): Promise<void> {
+    try {
+      await query(
+        `INSERT INTO bot_state (id, mode, settings, updated_at)
+         VALUES (1, $1, $2, NOW())
+         ON CONFLICT (id) DO UPDATE
+           SET mode = EXCLUDED.mode, settings = EXCLUDED.settings, updated_at = EXCLUDED.updated_at`,
+        [this.state, JSON.stringify(this.settings)]
+      );
+    } catch { /* non-fatal — table may not exist yet on first run */ }
+  }
+
+  // Called once at server startup — restores previous running state from DB
+  async restoreState(): Promise<void> {
+    try {
+      const rows = await query<{ mode: string; settings: unknown }>(
+        'SELECT mode, settings FROM bot_state WHERE id = 1'
+      );
+      if (!rows.length) return;
+      const { mode, settings: saved } = rows[0];
+      if (saved && typeof saved === 'object') {
+        this.settings = { ...this.settings, ...(saved as Partial<PegSettings>) };
+      }
+      if (mode !== 'MONITOR_ONLY' && mode !== 'AUTO_TRADE') return;
+      logger.info('[PegMaintainer] Restoring persisted bot state', { mode });
+      try {
+        await this.start(mode as 'MONITOR_ONLY' | 'AUTO_TRADE');
+      } catch (e: unknown) {
+        logger.error('[PegMaintainer] Auto-restart failed — check token/pair addresses', { error: (e as Error).message });
+      }
+    } catch (e: unknown) {
+      logger.error('[PegMaintainer] Failed to read persisted state', { error: (e as Error).message });
+    }
   }
 
   private _validateSettings(): void {

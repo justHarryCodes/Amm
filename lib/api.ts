@@ -20,6 +20,9 @@ api.interceptors.response.use(
 export const getAppSettings    = () => api.get('/api/settings').then(r => r.data);
 export const updateAppSettings = (s: Record<string, string>) => api.put('/api/settings', s).then(r => r.data);
 
+// ── Dashboard ──────────────────────────────────────────
+export const getDashboard = () => api.get('/api/dashboard').then(r => r.data);
+
 // ── Peg Maintainer ─────────────────────────────────────
 export const getPegStatus      = ()          => api.get('/api/peg/status').then(r => r.data);
 export const getPegConfig      = ()          => api.get('/api/peg/config').then(r => r.data);
