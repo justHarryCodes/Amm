@@ -14,6 +14,12 @@ import ROUTER_ABI  from '../abi/PancakeV2Router.json';
 import FACTORY_ABI from '../abi/PancakeV2Factory.json';
 import ERC20_ABI   from '../abi/ERC20.json';
 import { txOverrides, ensureApproval } from '../blockchain/contracts';
+import { CHAIN_TOKENS } from '../tokens';
+
+// Router is fixed per chain — always read from CHAIN_TOKENS, never from settings
+function getRouter(chain: 'bsc' | 'ethereum'): string {
+  return CHAIN_TOKENS[chain].router;
+}
 
 export type BotState = 'STOPPED' | 'MONITOR_ONLY' | 'AUTO_TRADE' | 'PAUSED';
 
@@ -138,13 +144,12 @@ class PegMaintainer extends EventEmitter {
   }
 
   private _validateSettings(): void {
-    const { chain, tokenAddress, stableAddress, pairAddress, routerAddress } = this.settings;
+    const { chain, tokenAddress, stableAddress, pairAddress } = this.settings;
     if (!tokenAddress)  throw new Error(`Token address not set for ${chain}`);
     if (!stableAddress) throw new Error(`Stable address not set for ${chain}`);
     if (chain === 'bsc' || chain === 'ethereum') {
-      if (!routerAddress) throw new Error(`Router address not set for ${chain}`);
       if (!pairAddress)
-        throw new Error(`Pair address not set for ${chain}. Use "Find Existing Pair" or "Create Pair & Add Initial Liquidity" in Settings.`);
+        throw new Error(`Pair address not set for ${chain}. Use "Find Existing Pair" or "Create Pair & Add Initial Liquidity" in the Pool section.`);
     }
   }
 
@@ -236,7 +241,8 @@ class PegMaintainer extends EventEmitter {
     slippage: number,
     rec: TradeRecord
   ): Promise<void> {
-    const { tokenAddress, stableAddress, routerAddress } = this.settings;
+    const { tokenAddress, stableAddress } = this.settings;
+    const routerAddress = getRouter(chain);
     const signer   = getChainSigner(chain);
     const router   = new ethers.Contract(routerAddress, ROUTER_ABI, signer);
     const provider = signer.provider!;
@@ -346,7 +352,7 @@ class PegMaintainer extends EventEmitter {
   // ── Pool management ───────────────────────────────────────────────────────
 
   async findPair(): Promise<string | null> {
-    const { chain, tokenAddress, stableAddress, routerAddress } = this.settings;
+    const { chain, tokenAddress, stableAddress } = this.settings;
 
     if (chain === 'solana') {
       if (!tokenAddress || !stableAddress) return null;
@@ -354,7 +360,8 @@ class PegMaintainer extends EventEmitter {
       return findSolanaPool(tokenAddress, stableAddress);
     }
 
-    if (!tokenAddress || !stableAddress || !routerAddress) return null;
+    if (!tokenAddress || !stableAddress) return null;
+    const routerAddress = getRouter(chain);
     const signer = getChainSigner(chain);
     const router = new ethers.Contract(routerAddress, ROUTER_ABI, signer);
     const factoryAddr: string = await router.factory();
@@ -369,7 +376,7 @@ class PegMaintainer extends EventEmitter {
     createTxHash: string | null;
     liquidityTxHash: string;
   }> {
-    const { chain, tokenAddress, stableAddress, routerAddress } = this.settings;
+    const { chain, tokenAddress, stableAddress } = this.settings;
 
     // ── Solana: Raydium CPMM ──────────────────────────────────────────────────
     if (chain === 'solana') {
@@ -388,9 +395,10 @@ class PegMaintainer extends EventEmitter {
     }
 
     // ── EVM: PancakeSwap V2 / Uniswap V2 ─────────────────────────────────────
-    if (!tokenAddress || !stableAddress || !routerAddress)
-      throw new Error('Token address, stable address, and router address must all be set first');
+    if (!tokenAddress || !stableAddress)
+      throw new Error('Token address and stable address must be set first');
 
+    const routerAddress = getRouter(chain);
     const signer = getChainSigner(chain);
     const router = new ethers.Contract(routerAddress, ROUTER_ABI, signer);
 
