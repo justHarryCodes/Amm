@@ -1,14 +1,11 @@
 import { NextResponse } from 'next/server';
 import { ethers } from 'ethers';
 import { getChainProvider, getChainSigner } from '@/lib/blockchain/provider';
-import { getSolanaKeypair } from '@/lib/solana/connection';
-import { Connection } from '@solana/web3.js';
+import { getSolanaConnection, getSolanaKeypair } from '@/lib/solana/connection';
 import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import { getMint, getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 import { pegMaintainer } from '@/lib/services/pegMaintainer';
 import { CHAIN_TOKENS } from '@/lib/tokens';
-import { config } from '@/lib/config';
-import { getSettings } from '@/lib/serverSettings';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -18,20 +15,18 @@ const ERC20_ABI = [
   'function decimals() view returns (uint8)',
 ];
 
-// Never throws — returns '0' on any RPC error
+// Individual helpers never throw — a single bad call returns '0', not an error
 async function getNativeBalance(
   address: string,
   provider: ethers.AbstractProvider
 ): Promise<string> {
   try {
-    const bal = await provider.getBalance(address);
-    return ethers.formatEther(bal);
+    return ethers.formatEther(await provider.getBalance(address));
   } catch {
     return '0';
   }
 }
 
-// Never throws — returns '0' on any RPC/contract error
 async function getErc20Balance(
   walletAddress: string,
   tokenAddr: string,
@@ -47,98 +42,29 @@ async function getErc20Balance(
   }
 }
 
-// Build a Solana connection that always falls back to public RPC if Alchemy fails
-function getSolanaConnectionRobust(): Connection {
-  const solNet = getSettings().solanaNetwork;
-  const isMainnet = solNet === 'mainnet-beta';
-
-  // Try Alchemy first, then public fallback
-  const urls: string[] = [];
-
-  if (config.alchemy.apiKey) {
-    urls.push(
-      isMainnet
-        ? `https://solana-mainnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-        : `https://solana-devnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-    );
-  }
-
-  // Always include public RPC
-  urls.push(
-    isMainnet
-      ? 'https://api.mainnet-beta.solana.com'
-      : 'https://api.devnet.solana.com'
-  );
-
-  // Return connection using first URL; if it fails caller can retry with second
-  return new Connection(urls[0], { commitment: 'confirmed', disableRetryOnRateLimit: true });
-}
-
-// Never throws — returns '0' on any error, tries public RPC as fallback
-async function getSolBalance(walletPubkey: PublicKey): Promise<string> {
-  const urls: string[] = [];
-  const solNet = getSettings().solanaNetwork;
-  const isMainnet = solNet === 'mainnet-beta';
-
-  if (config.alchemy.apiKey) {
-    urls.push(
-      isMainnet
-        ? `https://solana-mainnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-        : `https://solana-devnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-    );
-  }
-  urls.push(isMainnet ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com');
-
-  for (const url of urls) {
-    try {
-      const conn = new Connection(url, { commitment: 'confirmed', disableRetryOnRateLimit: true });
-      const lamports = await conn.getBalance(walletPubkey, 'confirmed');
-      return (lamports / LAMPORTS_PER_SOL).toFixed(6);
-    } catch {
-      continue;
-    }
-  }
-  return '0';
-}
-
-// Never throws — returns '0' on any error, tries public RPC as fallback
-async function getSplBalance(walletPubkey: PublicKey, mintAddr: string): Promise<string> {
+async function getSplBalance(
+  walletPubkey: PublicKey,
+  mintAddr: string
+): Promise<string> {
   if (!mintAddr) return '0';
-
-  const solNet = getSettings().solanaNetwork;
-  const isMainnet = solNet === 'mainnet-beta';
-  const urls: string[] = [];
-
-  if (config.alchemy.apiKey) {
-    urls.push(
-      isMainnet
-        ? `https://solana-mainnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-        : `https://solana-devnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-    );
+  try {
+    const conn     = getSolanaConnection();
+    const mint     = new PublicKey(mintAddr);
+    const mintInfo = await getMint(conn, mint, 'confirmed');
+    const ata      = await getAssociatedTokenAddress(mint, walletPubkey);
+    const account  = await getAccount(conn, ata, 'confirmed');
+    const raw      = Number(account.amount);
+    return (raw / 10 ** mintInfo.decimals).toFixed(mintInfo.decimals > 6 ? 6 : mintInfo.decimals);
+  } catch {
+    return '0';
   }
-  urls.push(isMainnet ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com');
-
-  for (const url of urls) {
-    try {
-      const conn = new Connection(url, { commitment: 'confirmed', disableRetryOnRateLimit: true });
-      const mint = new PublicKey(mintAddr);
-      const mintInfo = await getMint(conn, mint, 'confirmed');
-      const ata = await getAssociatedTokenAddress(mint, walletPubkey);
-      const account = await getAccount(conn, ata, 'confirmed');
-      const raw = Number(account.amount);
-      return (raw / 10 ** mintInfo.decimals).toFixed(mintInfo.decimals > 6 ? 6 : mintInfo.decimals);
-    } catch {
-      continue;
-    }
-  }
-  return '0';
 }
 
 export async function GET() {
   const { chain, tokenAddress, stableAddress } = pegMaintainer.settings;
   const isEvm = chain === 'bsc' || chain === 'ethereum';
 
-  // ── EVM balances ──────────────────────────────────────────────
+  // ── EVM ──────────────────────────────────────────────────────────────────────
   let evmData: {
     address: string;
     bsc: string;
@@ -155,12 +81,12 @@ export async function GET() {
   let evmError: string | undefined;
 
   try {
-    const signer = getChainSigner('bsc');
-    const bscProvider = getChainProvider('bsc');
-    const ethProvider = getChainProvider('ethereum');
-    const activeEvmProvider = isEvm ? getChainProvider(chain as 'bsc' | 'ethereum') : bscProvider;
+    const signer          = getChainSigner('bsc');
+    const bscProvider     = getChainProvider('bsc');
+    const ethProvider     = getChainProvider('ethereum');
+    const activeProvider  = isEvm ? getChainProvider(chain as 'bsc' | 'ethereum') : bscProvider;
 
-    // Each balance is fetched independently — one RPC failure won't kill the rest
+    // Each fetch is independent — one failure returns '0' without blocking the rest
     const [
       bscBal, ethBal,
       tokenBal, stableBal,
@@ -169,8 +95,8 @@ export async function GET() {
     ] = await Promise.all([
       getNativeBalance(signer.address, bscProvider),
       getNativeBalance(signer.address, ethProvider),
-      isEvm ? getErc20Balance(signer.address, tokenAddress, activeEvmProvider) : Promise.resolve('0'),
-      isEvm ? getErc20Balance(signer.address, stableAddress, activeEvmProvider) : Promise.resolve('0'),
+      isEvm ? getErc20Balance(signer.address, tokenAddress, activeProvider) : Promise.resolve('0'),
+      isEvm ? getErc20Balance(signer.address, stableAddress, activeProvider) : Promise.resolve('0'),
       getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdc.address, bscProvider),
       getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdt.address, bscProvider),
       getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdc.address, ethProvider),
@@ -178,23 +104,20 @@ export async function GET() {
     ]);
 
     evmData = {
-      address: signer.address,
-      bsc: bscBal,
-      ethereum: ethBal,
+      address:      signer.address,
+      bsc:          bscBal,
+      ethereum:     ethBal,
       tokenBalance: tokenBal,
       stableBalance: stableBal,
-      tokenAddress: isEvm ? tokenAddress : '',
+      tokenAddress:  isEvm ? tokenAddress : '',
       stableAddress: isEvm ? stableAddress : '',
-      bscUsdc,
-      bscUsdt,
-      ethUsdc,
-      ethUsdt,
+      bscUsdc, bscUsdt, ethUsdc, ethUsdt,
     };
   } catch (e: unknown) {
     evmError = (e as Error).message;
   }
 
-  // ── Solana balances ───────────────────────────────────────────
+  // ── Solana ───────────────────────────────────────────────────────────────────
   let solanaData: {
     address: string;
     sol: string;
@@ -209,10 +132,10 @@ export async function GET() {
 
   try {
     const keypair = getSolanaKeypair();
+    const conn    = getSolanaConnection();
+    const lamports = await conn.getBalance(keypair.publicKey, 'confirmed');
 
-    // All SPL fetches are non-throwing; sol balance tries Alchemy then public
-    const [sol, tokenBal, stableBal, usdcBalance, usdtBalance] = await Promise.all([
-      getSolBalance(keypair.publicKey),
+    const [tokenBal, stableBal, usdcBalance, usdtBalance] = await Promise.all([
       chain === 'solana' ? getSplBalance(keypair.publicKey, tokenAddress) : Promise.resolve('0'),
       chain === 'solana' ? getSplBalance(keypair.publicKey, stableAddress) : Promise.resolve('0'),
       getSplBalance(keypair.publicKey, CHAIN_TOKENS.solana.usdc.address),
@@ -220,12 +143,12 @@ export async function GET() {
     ]);
 
     solanaData = {
-      address: keypair.publicKey.toBase58(),
-      sol,
+      address:      keypair.publicKey.toBase58(),
+      sol:          (lamports / LAMPORTS_PER_SOL).toFixed(6),
       tokenBalance: tokenBal,
       stableBalance: stableBal,
-      tokenMint: chain === 'solana' ? tokenAddress : '',
-      stableMint: chain === 'solana' ? stableAddress : '',
+      tokenMint:    chain === 'solana' ? tokenAddress : '',
+      stableMint:   chain === 'solana' ? stableAddress : '',
       usdcBalance,
       usdtBalance,
     };

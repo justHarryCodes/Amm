@@ -4,56 +4,40 @@ import { getSettings } from '../serverSettings';
 import { logger } from '../utils/logger';
 
 declare global {
-  var __provider: ethers.AbstractProvider | undefined;
-  var __signer: ethers.Wallet | undefined;
   var __evmProviders: Map<string, ethers.AbstractProvider> | undefined;
-  var __evmSigners: Map<string, ethers.Wallet> | undefined;
+  var __evmSigners:   Map<string, ethers.Wallet>           | undefined;
 }
 
-// Chain IDs for static network — avoids eth_chainId detection on every startup.
+// Chain IDs for staticNetwork — avoids eth_chainId detection on every startup
 const CHAIN_IDS: Record<'bsc' | 'ethereum', Record<string, number>> = {
   bsc:      { mainnet: 56,  testnet: 97 },
-  ethereum: { mainnet: 1,   testnet: 11155111 }, // sepolia testnet
+  ethereum: { mainnet: 1,   testnet: 11155111 }, // Sepolia
 };
 
-// Build a provider for one EVM chain.
-// Passing Network as staticNetwork skips initial network-detection entirely (ethers v6 behaviour).
-function buildProvider(chain: 'bsc' | 'ethereum'): ethers.AbstractProvider {
-  const netMode = getSettings().evmNetwork === 'mainnet' ? 'mainnet' : 'testnet';
-  const chainId = CHAIN_IDS[chain][netMode];
-  const staticNet = ethers.Network.from(chainId);
-
-  let publicUrl: string;
+function alchemyUrl(chain: 'bsc' | 'ethereum', netMode: 'mainnet' | 'testnet', key: string): string {
   if (chain === 'bsc') {
-    publicUrl = netMode === 'mainnet'
-      ? config.pegChains.bsc.rpcMainnet
-      : config.pegChains.bsc.rpcTestnet;
-  } else {
-    publicUrl = config.pegChains.ethereum.rpcUrl;
+    return netMode === 'mainnet'
+      ? `https://bnb-mainnet.g.alchemy.com/v2/${key}`
+      : `https://bnb-testnet.g.alchemy.com/v2/${key}`;
   }
-
-  if (!publicUrl) {
-    throw new Error(`No RPC URL configured for ${chain} ${netMode}`);
-  }
-
-  const primary = new ethers.JsonRpcProvider(publicUrl, staticNet, { staticNetwork: staticNet });
-
-  const key = config.alchemy.apiKey;
-  if (!key) return primary;
-
-  const alchemyUrl = chain === 'bsc'
-    ? `https://bnb-${netMode}.g.alchemy.com/v2/${key}`
-    : `https://eth-mainnet.g.alchemy.com/v2/${key}`;
-
-  const alchemy = new ethers.JsonRpcProvider(alchemyUrl, staticNet, { staticNetwork: staticNet });
-
-  return new ethers.FallbackProvider([
-    { provider: primary, priority: 1, weight: 1, stallTimeout: 2000 },
-    { provider: alchemy,  priority: 2, weight: 1, stallTimeout: 4000 },
-  ]);
+  return netMode === 'mainnet'
+    ? `https://eth-mainnet.g.alchemy.com/v2/${key}`
+    : `https://eth-sepolia.g.alchemy.com/v2/${key}`;
 }
 
-// ── BSC default (used by bulk sender) ──────────────────────────────────────
+function buildProvider(chain: 'bsc' | 'ethereum'): ethers.AbstractProvider {
+  const key = config.alchemy.apiKey;
+  if (!key) throw new Error('ALCHEMY_API_KEY is not configured — all RPC calls go through Alchemy');
+
+  const netMode = getSettings().evmNetwork === 'mainnet' ? 'mainnet' : 'testnet';
+  const chainId  = CHAIN_IDS[chain][netMode];
+  const staticNet = ethers.Network.from(chainId);
+  const url = alchemyUrl(chain, netMode, key);
+
+  return new ethers.JsonRpcProvider(url, staticNet, { staticNetwork: staticNet });
+}
+
+// ── Default exports (BSC) — used by bulk sender ─────────────────────────────
 
 export function getProvider(): ethers.AbstractProvider {
   return getChainProvider('bsc');
@@ -63,19 +47,14 @@ export function getSigner(): ethers.Wallet {
   return getChainSigner('bsc');
 }
 
-// ── Multi-chain EVM ─────────────────────────────────────────────────────────
-// BOT_PRIVATE_KEY works on both BSC and Ethereum: same secp256k1 key → same address
+// ── Multi-chain ──────────────────────────────────────────────────────────────
 
 export function getChainProvider(chain: 'bsc' | 'ethereum'): ethers.AbstractProvider {
   if (!global.__evmProviders) global.__evmProviders = new Map();
   if (!global.__evmProviders.has(chain)) {
     const p = buildProvider(chain);
     global.__evmProviders.set(chain, p);
-    logger.info('EVM provider ready', {
-      chain,
-      alchemy: !!config.alchemy.apiKey,
-      mode: config.alchemy.apiKey ? 'fallback(public+alchemy)' : 'public-only',
-    });
+    logger.info('EVM provider ready (Alchemy)', { chain, network: getSettings().evmNetwork });
   }
   return global.__evmProviders.get(chain)!;
 }
@@ -92,12 +71,11 @@ export function getChainSigner(chain: 'bsc' | 'ethereum'): ethers.Wallet {
 }
 
 export async function getGasPrice(chain: 'bsc' | 'ethereum' = 'bsc'): Promise<bigint> {
-  const fee = await getChainProvider(chain).getFeeData();
+  const fee  = await getChainProvider(chain).getFeeData();
   const base = fee.gasPrice ?? ethers.parseUnits('5', 'gwei');
   return (base * 110n) / 100n;
 }
 
-// Call this after changing evmNetwork so providers rebuild with the new RPC.
 export function clearEvmCaches(): void {
   global.__evmProviders = undefined;
   global.__evmSigners   = undefined;

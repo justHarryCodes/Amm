@@ -14,8 +14,9 @@ import {
 import { useMemo, useState } from 'react';
 import { wagmiConfig } from '@/lib/wagmi';
 
-const SOL_RPC =
-  process.env.NEXT_PUBLIC_SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com';
+// NEXT_PUBLIC_ALCHEMY_API_KEY — restrict to your domain in the Alchemy dashboard
+const _alchemyKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY ?? '';
+const SOL_RPC = `https://solana-mainnet.g.alchemy.com/v2/${_alchemyKey}`;
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());

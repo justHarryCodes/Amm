@@ -7,35 +7,29 @@ import { logger } from '../utils/logger';
 
 declare global {
   var __solanaConnection: Connection | undefined;
-  var __solanaKeypair: Keypair | undefined;
+  var __solanaKeypair:    Keypair    | undefined;
+}
+
+function buildSolanaUrl(): string {
+  const key = config.alchemy.apiKey;
+  if (!key) throw new Error('ALCHEMY_API_KEY is not configured — all RPC calls go through Alchemy');
+
+  const solNet    = getSettings().solanaNetwork;
+  const isMainnet = solNet === 'mainnet-beta';
+
+  return isMainnet
+    ? `https://solana-mainnet.g.alchemy.com/v2/${key}`
+    : `https://solana-devnet.g.alchemy.com/v2/${key}`;
 }
 
 export function getSolanaConnection(): Connection {
   if (!global.__solanaConnection) {
-    const solNet = getSettings().solanaNetwork;
-    const isMainnet = solNet === 'mainnet-beta';
-
-    let rpcUrl: string;
-    if (config.alchemy.apiKey) {
-      rpcUrl = isMainnet
-        ? `https://solana-mainnet.g.alchemy.com/v2/${config.alchemy.apiKey}`
-        : `https://solana-devnet.g.alchemy.com/v2/${config.alchemy.apiKey}`;
-    } else if (config.solana.rpcUrl && !config.solana.rpcUrl.includes('devnet')) {
-      rpcUrl = config.solana.rpcUrl;
-    } else {
-      rpcUrl = isMainnet
-        ? 'https://api.mainnet-beta.solana.com'
-        : 'https://api.devnet.solana.com';
-    }
-
-    global.__solanaConnection = new Connection(rpcUrl, {
+    const url = buildSolanaUrl();
+    global.__solanaConnection = new Connection(url, {
       commitment: 'confirmed',
       confirmTransactionInitialTimeout: config.solana.confirmTimeout * 1000,
     });
-    logger.info('Solana connection ready', {
-      network: solNet,
-      mode: config.alchemy.apiKey ? 'alchemy' : 'public',
-    });
+    logger.info('Solana connection ready (Alchemy)', { network: getSettings().solanaNetwork });
   }
   return global.__solanaConnection;
 }
@@ -48,11 +42,11 @@ export function getSolanaKeypair(): Keypair {
   if (!global.__solanaKeypair) {
     if (!config.solana.privateKey) throw new Error('SOLANA_PRIVATE_KEY is not configured');
     try {
-      // Try base58 first (Phantom / Backpack export format)
+      // Phantom / Backpack: base58-encoded 64-byte secret key
       const secretKey = bs58.decode(config.solana.privateKey);
       global.__solanaKeypair = Keypair.fromSecretKey(secretKey);
     } catch {
-      // Fall back to JSON array format: "[1,2,3,...]"
+      // JSON array format: "[1,2,3,...]"
       const arr = JSON.parse(config.solana.privateKey) as number[];
       global.__solanaKeypair = Keypair.fromSecretKey(Uint8Array.from(arr));
     }
@@ -66,11 +60,11 @@ export async function getSolanaWalletInfo(): Promise<{
   solBalance: string;
   tokenBalance: string | null;
 }> {
-  const conn     = getSolanaConnection();
-  const keypair  = getSolanaKeypair();
-  const address  = keypair.publicKey.toBase58();
+  const conn    = getSolanaConnection();
+  const keypair = getSolanaKeypair();
+  const address = keypair.publicKey.toBase58();
 
-  const lamports = await conn.getBalance(keypair.publicKey, 'confirmed');
+  const lamports   = await conn.getBalance(keypair.publicKey, 'confirmed');
   const solBalance = (lamports / LAMPORTS_PER_SOL).toFixed(6);
 
   return { address, solBalance, tokenBalance: null };

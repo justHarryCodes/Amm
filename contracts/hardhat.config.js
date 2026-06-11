@@ -1,6 +1,8 @@
 require('@nomicfoundation/hardhat-toolbox');
 require('dotenv').config();
 
+const alchemyKey = process.env.ALCHEMY_API_KEY ?? '';
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
@@ -9,12 +11,12 @@ module.exports = {
   },
   networks: {
     bscTestnet: {
-      url: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
+      url: `https://bnb-testnet.g.alchemy.com/v2/${alchemyKey}`,
       chainId: 97,
       accounts: process.env.BOT_PRIVATE_KEY ? [process.env.BOT_PRIVATE_KEY] : [],
     },
     bscMainnet: {
-      url: 'https://bsc-dataseed.binance.org/',
+      url: `https://bnb-mainnet.g.alchemy.com/v2/${alchemyKey}`,
       chainId: 56,
       accounts: process.env.BOT_PRIVATE_KEY ? [process.env.BOT_PRIVATE_KEY] : [],
     },
