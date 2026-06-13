@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { getProvider, getSigner, getChainProvider, getChainSigner, getGasPrice } from './provider';
 import { config } from '../config';
+import { logger } from '../utils/logger';
 
 import ERC20_ABI       from '../abi/ERC20.json';
 import PAIR_ABI        from '../abi/PancakeV2Pair.json';
@@ -51,9 +52,13 @@ export async function ensureApproval(
   const signer = getChainSigner(chain);
   const c = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
   const allowance: bigint = await c.allowance(signer.address, spenderAddress);
+  logger.info('Approval check', { token: tokenAddress, spender: spenderAddress, allowance: allowance.toString(), needed: amount.toString() });
   if (allowance >= amount) return null;
+  logger.info('Approving token for spender...', { token: tokenAddress, spender: spenderAddress });
   const overrides = await txOverrides(chain);
   const tx = await c.approve(spenderAddress, ethers.MaxUint256, overrides);
   await tx.wait();
+  const after: bigint = await c.allowance(signer.address, spenderAddress);
+  logger.info('Approval confirmed', { token: tokenAddress, spender: spenderAddress, allowance: after.toString(), txHash: tx.hash });
   return tx.hash as string;
 }

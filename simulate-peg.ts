@@ -160,7 +160,7 @@ async function main() {
     // Safety check simulation
     console.log(HEAD('4. Safety-Check Simulation'));
     const settings = {
-      minLiquidityUsd: 5000, cooldownSeconds: 300,
+      minLiquidityUsd: 2, cooldownSeconds: 300,
       maxDailySpendUsd: 500, maxTradeSizeTokens: 1000,
     };
 

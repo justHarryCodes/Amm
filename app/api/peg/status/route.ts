@@ -104,6 +104,12 @@ export async function GET() {
       cgChange24h:    snap?.cgChange24h    ?? null,
       cgVolume24h:    snap?.cgVolume24h    ?? null,
       cgMarketCap:    snap?.cgMarketCap    ?? null,
+
+      // Pool version and fee tier
+      dexVersion:  snap?.dexVersion ?? 'unknown',
+      poolFeeTier: pegMaintainer.settings.poolFeeTier ?? 0,
+      volumeEnabled:         pegMaintainer.settings.volumeEnabled,
+      volumeIntervalSeconds: pegMaintainer.settings.volumeIntervalSeconds,
     });
   } catch (e: unknown) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

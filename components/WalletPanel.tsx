@@ -25,10 +25,12 @@ import {
   getAssociatedTokenAddressSync,
   getMint,
 } from '@solana/spl-token';
-import { X, Wallet, ArrowDownToLine, ArrowUpFromLine, Copy, Check, Loader2, AlertCircle } from 'lucide-react';
+import { X, Wallet, ArrowDownToLine, ArrowUpFromLine, Copy, Check, Loader2, AlertCircle, ChevronDown } from 'lucide-react';
 import toast from 'react-hot-toast';
 import clsx from 'clsx';
 import { CHAIN_TOKENS } from '@/lib/tokens';
+
+const CUSTOM_STABLE_ADDR = '0xbDFA0F1B0C42B2C43B31a2C5F1584B1759D48888';
 
 
 const ERC20_DECIMALS_ABI = [
@@ -63,10 +65,17 @@ interface BotBalances {
     stableBalance: string;
     tokenAddress: string;
     stableAddress: string;
+    tokenSymbol: string;
+    stableSymbol: string;
     bscUsdc: string;
     bscUsdt: string;
+    bscWbnb: string;
     ethUsdc: string;
     ethUsdt: string;
+    ethWeth: string;
+    customStable: string;
+    customStableSymbol: string;
+    activeChain: string;
   };
   solana?: {
     address: string;
@@ -77,6 +86,7 @@ interface BotBalances {
     stableMint: string;
     usdcBalance: string;
     usdtBalance: string;
+    wsolBalance: string;
   };
   errors: Record<string, string>;
 }
@@ -100,6 +110,78 @@ function CopyButton({ text }: { text: string }) {
 function shortAddr(addr: string) {
   if (!addr) return '';
   return addr.length > 20 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
+}
+
+// ── Token wallet helpers ───────────────────────────────────────────────────────
+
+const KNOWN_TOKEN_COLORS: Record<string, string> = {
+  BNB:  'bg-amber-500',  WBNB: 'bg-amber-700',
+  ETH:  'bg-indigo-500', WETH: 'bg-indigo-700',
+  USDC: 'bg-blue-600',   USDT: 'bg-emerald-600',
+  SOL:  'bg-purple-600', wSOL: 'bg-purple-700',
+};
+const COLOR_PALETTE = [
+  'bg-sky-600','bg-pink-600','bg-cyan-600','bg-orange-600',
+  'bg-teal-600','bg-rose-600','bg-violet-600','bg-lime-600',
+];
+function tokenAvatarColor(sym: string): string {
+  if (KNOWN_TOKEN_COLORS[sym]) return KNOWN_TOKEN_COLORS[sym];
+  let h = 0;
+  for (const c of sym) h = (h * 31 + c.charCodeAt(0)) % COLOR_PALETTE.length;
+  return COLOR_PALETTE[h];
+}
+
+function TokenRow({
+  symbol, name, balance, badge, isLowBal = false,
+}: {
+  symbol: string; name: string; balance: string; badge?: string; isLowBal?: boolean;
+}) {
+  const bal    = parseFloat(balance || '0');
+  const isZero = bal === 0;
+  const fmt    = bal === 0
+    ? '0'
+    : bal >= 10_000
+      ? bal.toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : bal >= 1
+        ? bal.toLocaleString(undefined, { maximumFractionDigits: 4 })
+        : bal.toLocaleString(undefined, { maximumFractionDigits: 6 });
+
+  return (
+    <div className="flex items-center gap-3 py-3 px-1">
+      <div className={clsx(
+        'h-9 w-9 rounded-full flex items-center justify-center text-[11px] font-bold text-white shrink-0',
+        tokenAvatarColor(symbol),
+        isZero && 'opacity-35',
+      )}>
+        {symbol.slice(0, 3).toUpperCase()}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className={clsx('text-sm font-semibold leading-none',
+            isZero ? 'text-zinc-600' : isLowBal ? 'text-amber-300' : 'text-zinc-100')}>
+            {symbol}
+          </span>
+          {badge && (
+            <span className={clsx('text-[10px] px-1.5 py-0.5 rounded font-bold leading-none uppercase tracking-wide',
+              badge === 'GAS'    ? 'bg-amber-500/15 text-amber-400' :
+              badge === 'PEG'    ? 'bg-brand-500/15 text-brand-400' :
+              badge === 'STABLE' ? 'bg-emerald-500/15 text-emerald-400' :
+              'bg-zinc-800 text-zinc-500')}>
+              {badge}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-zinc-600 mt-0.5 truncate">{name}</p>
+      </div>
+      <div className="text-right shrink-0">
+        <p className={clsx('text-sm font-mono leading-none font-medium',
+          isZero ? 'text-zinc-700' : isLowBal ? 'text-red-400' : 'text-zinc-100')}>
+          {fmt}
+        </p>
+        <p className="text-[11px] text-zinc-600 mt-0.5">{symbol}</p>
+      </div>
+    </div>
+  );
 }
 
 // ── EVM Section ────────────────────────────────────────────────────────────────
@@ -223,29 +305,75 @@ function EvmSection({ botInfo }: { botInfo: BotBalances | null }) {
 
       {/* Bot wallet info */}
       {botInfo?.evm && (
-        <div className="card-sm">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Bot EVM Wallet</p>
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-xs text-zinc-400 font-mono">{shortAddr(botInfo.evm.address)}</span>
-            <CopyButton text={botInfo.evm.address} />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            {([
-              ['BSC (BNB)', parseFloat(botInfo.evm.bsc).toFixed(4)],
-              ['Ethereum (ETH)', parseFloat(botInfo.evm.ethereum).toFixed(4)],
-              ...(botInfo.evm.tokenAddress ? [['Peg Token', parseFloat(botInfo.evm.tokenBalance).toFixed(4)]] : []),
-              ...(botInfo.evm.stableAddress ? [['Stablecoin', parseFloat(botInfo.evm.stableBalance).toFixed(4)]] : []),
-              // USDC/USDT shown for the active chain
-              [`USDC (${activeChain === 'bsc' ? 'BSC' : 'ETH'})`,
-                parseFloat(activeChain === 'bsc' ? botInfo.evm.bscUsdc : botInfo.evm.ethUsdc).toFixed(2)],
-              [`USDT (${activeChain === 'bsc' ? 'BSC' : 'ETH'})`,
-                parseFloat(activeChain === 'bsc' ? botInfo.evm.bscUsdt : botInfo.evm.ethUsdt).toFixed(2)],
-            ] as [string, string][]).map(([label, value]) => (
-              <div key={label} className="surface">
-                <p className="text-xs text-zinc-600">{label}</p>
-                <p className="text-sm font-mono text-zinc-100 mt-0.5">{value}</p>
+        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/70">
+            <div className="flex items-center gap-2.5">
+              <div className={clsx(
+                'h-8 w-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0',
+                activeChain === 'bsc'
+                  ? 'bg-amber-500/20 text-amber-400'
+                  : 'bg-indigo-500/20 text-indigo-400',
+              )}>
+                {activeChain === 'bsc' ? 'B' : 'E'}
               </div>
-            ))}
+              <div>
+                <p className="text-xs font-semibold text-zinc-300 leading-none">Bot Wallet</p>
+                <div className="flex items-center gap-1 mt-1">
+                  <span className="text-[11px] text-zinc-500 font-mono">{shortAddr(botInfo.evm.address)}</span>
+                  <CopyButton text={botInfo.evm.address} />
+                </div>
+              </div>
+            </div>
+            <span className={clsx('text-xs font-semibold px-2.5 py-1 rounded-lg',
+              activeChain === 'bsc'
+                ? 'bg-amber-500/10 text-amber-400'
+                : 'bg-indigo-500/10 text-indigo-400')}>
+              {activeChain === 'bsc' ? 'BSC' : 'ETH'}
+            </span>
+          </div>
+
+          {/* Token list */}
+          <div className="divide-y divide-zinc-800/50 px-3">
+            {activeChain === 'bsc' ? (
+              <>
+                <TokenRow symbol="BNB"  name="Binance Coin"  balance={botInfo.evm.bsc}  badge="GAS"
+                  isLowBal={parseFloat(botInfo.evm.bsc) < 0.005} />
+                <TokenRow symbol="WBNB" name="Wrapped BNB"  balance={botInfo.evm.bscWbnb ?? '0'} />
+                {botInfo.evm.tokenAddress && botInfo.evm.activeChain === 'bsc' && (
+                  <TokenRow
+                    symbol={botInfo.evm.tokenSymbol || botInfo.evm.tokenAddress.slice(0, 6)}
+                    name="Peg Token"
+                    balance={botInfo.evm.tokenBalance}
+                    badge="PEG"
+                  />
+                )}
+                <TokenRow
+                  symbol={botInfo.evm.customStableSymbol || 'MYUSD'}
+                  name="Custom Stable"
+                  balance={botInfo.evm.customStable ?? '0'}
+                  badge="STABLE"
+                />
+                <TokenRow symbol="USDC" name="USD Coin"   balance={botInfo.evm.bscUsdc} />
+                <TokenRow symbol="USDT" name="Tether USD" balance={botInfo.evm.bscUsdt} />
+              </>
+            ) : (
+              <>
+                <TokenRow symbol="ETH"  name="Ethereum"    balance={botInfo.evm.ethereum}  badge="GAS"
+                  isLowBal={parseFloat(botInfo.evm.ethereum) < 0.002} />
+                <TokenRow symbol="WETH" name="Wrapped ETH" balance={botInfo.evm.ethWeth ?? '0'} />
+                {botInfo.evm.tokenAddress && botInfo.evm.activeChain === 'ethereum' && (
+                  <TokenRow
+                    symbol={botInfo.evm.tokenSymbol || botInfo.evm.tokenAddress.slice(0, 6)}
+                    name="Peg Token"
+                    balance={botInfo.evm.tokenBalance}
+                    badge="PEG"
+                  />
+                )}
+                <TokenRow symbol="USDC" name="USD Coin"   balance={botInfo.evm.ethUsdc} />
+                <TokenRow symbol="USDT" name="Tether USD" balance={botInfo.evm.ethUsdt} />
+              </>
+            )}
           </div>
         </div>
       )}
@@ -284,22 +412,28 @@ function EvmSection({ botInfo }: { botInfo: BotBalances | null }) {
           </div>
           {fundAsset === 'token' && (
             <div className="space-y-2">
-              {(botInfo?.evm?.tokenAddress || botInfo?.evm?.stableAddress) && (
-                <div className="flex gap-1.5">
-                  {botInfo?.evm?.tokenAddress && (
-                    <button type="button" onClick={() => setFundToken(botInfo.evm!.tokenAddress)}
-                      className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">
-                      Peg Token
-                    </button>
-                  )}
-                  {botInfo?.evm?.stableAddress && (
-                    <button type="button" onClick={() => setFundToken(botInfo.evm!.stableAddress)}
-                      className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">
-                      Stable
-                    </button>
-                  )}
-                </div>
-              )}
+              <div className="flex gap-1.5 flex-wrap">
+                {(activeChain === 'bsc' ? [
+                  { label: 'WBNB',  addr: CHAIN_TOKENS.bsc.wNative.address },
+                  ...(botInfo?.evm?.tokenAddress && botInfo.evm.activeChain === 'bsc' ? [{ label: botInfo.evm.tokenSymbol || 'PEG', addr: botInfo.evm.tokenAddress }] : []),
+                  { label: botInfo?.evm?.customStableSymbol || 'MYUSD', addr: CUSTOM_STABLE_ADDR },
+                  { label: 'USDC',  addr: CHAIN_TOKENS.bsc.usdc.address },
+                  { label: 'USDT',  addr: CHAIN_TOKENS.bsc.usdt.address },
+                ] : [
+                  { label: 'WETH',  addr: CHAIN_TOKENS.ethereum.wNative.address },
+                  ...(botInfo?.evm?.tokenAddress && botInfo.evm.activeChain === 'ethereum' ? [{ label: botInfo.evm.tokenSymbol || 'PEG', addr: botInfo.evm.tokenAddress }] : []),
+                  { label: 'USDC',  addr: CHAIN_TOKENS.ethereum.usdc.address },
+                  { label: 'USDT',  addr: CHAIN_TOKENS.ethereum.usdt.address },
+                ]).map(({ label, addr }) => (
+                  <button key={addr} type="button" onClick={() => setFundToken(addr)}
+                    className={clsx('px-2 py-1 rounded-lg text-xs transition-colors',
+                      fundToken === addr
+                        ? 'bg-brand-500/10 text-brand-400 border border-brand-500/30'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-zinc-100')}>
+                    {label}
+                  </button>
+                ))}
+              </div>
               <input placeholder="Token contract address" value={fundToken}
                 onChange={(e) => setFundToken(e.target.value)} className="input font-mono text-xs" />
             </div>
@@ -320,48 +454,96 @@ function EvmSection({ botInfo }: { botInfo: BotBalances | null }) {
         <p className="text-xs text-zinc-500 uppercase tracking-wide font-medium flex items-center gap-2">
           <ArrowUpFromLine className="h-3.5 w-3.5 text-blue-400" /> Withdraw from Bot
         </p>
-        {!isConnected && <p className="text-xs text-zinc-500">Connect your wallet to set the destination.</p>}
-        <div className="flex gap-2">
-          {(['native', 'token'] as const).map((a) => (
-            <button key={a} onClick={() => setWithdrawAsset(a)}
-              className={clsx('flex-1 py-2 rounded-xl text-xs font-medium border transition-colors',
-                withdrawAsset === a ? 'border-brand-500 bg-brand-500/10 text-brand-400' : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
-              {a === 'native' ? nativeSymbol : 'ERC-20'}
-            </button>
-          ))}
-        </div>
-        {withdrawAsset === 'token' && (
-          <div className="space-y-2">
-            {(botInfo?.evm?.tokenAddress || botInfo?.evm?.stableAddress) && (
-              <div className="flex gap-1.5">
-                {botInfo?.evm?.tokenAddress && (
-                  <button type="button" onClick={() => setWithdrawToken(botInfo.evm!.tokenAddress)}
-                    className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">
-                    Peg Token
-                  </button>
-                )}
-                {botInfo?.evm?.stableAddress && (
-                  <button type="button" onClick={() => setWithdrawToken(botInfo.evm!.stableAddress)}
-                    className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">
-                    Stable
-                  </button>
-                )}
-              </div>
-            )}
-            <input placeholder="Token contract address" value={withdrawToken}
-              onChange={(e) => setWithdrawToken(e.target.value)} className="input font-mono text-xs" />
-          </div>
+        {!isConnected && (
+          <p className="text-xs text-zinc-500">Connect your wallet above to set the destination address.</p>
         )}
+
+        {/* Token picker — all wallet tokens for the active chain */}
+        <div className="space-y-1.5">
+          <p className="text-[11px] text-zinc-600 uppercase tracking-wide font-medium">Choose token</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {(activeChain === 'bsc' ? [
+              { symbol: nativeSymbol,  address: null,                balance: botInfo?.evm?.bsc ?? '0' },
+              { symbol: 'WBNB',        address: CHAIN_TOKENS.bsc.wNative.address, balance: botInfo?.evm?.bscWbnb ?? '0' },
+              ...(botInfo?.evm?.tokenAddress && botInfo.evm.activeChain === 'bsc'
+                ? [{ symbol: botInfo.evm.tokenSymbol || 'TOKEN', address: botInfo.evm.tokenAddress, balance: botInfo.evm.tokenBalance }]
+                : []),
+              { symbol: botInfo?.evm?.customStableSymbol || 'MYUSD', address: CUSTOM_STABLE_ADDR, balance: botInfo?.evm?.customStable ?? '0' },
+              { symbol: 'USDC',        address: CHAIN_TOKENS.bsc.usdc.address,    balance: botInfo?.evm?.bscUsdc ?? '0' },
+              { symbol: 'USDT',        address: CHAIN_TOKENS.bsc.usdt.address,    balance: botInfo?.evm?.bscUsdt ?? '0' },
+            ] : [
+              { symbol: nativeSymbol,  address: null,                balance: botInfo?.evm?.ethereum ?? '0' },
+              { symbol: 'WETH',        address: CHAIN_TOKENS.ethereum.wNative.address, balance: botInfo?.evm?.ethWeth ?? '0' },
+              ...(botInfo?.evm?.tokenAddress && botInfo.evm.activeChain === 'ethereum'
+                ? [{ symbol: botInfo.evm.tokenSymbol || 'TOKEN', address: botInfo.evm.tokenAddress, balance: botInfo.evm.tokenBalance }]
+                : []),
+              { symbol: 'USDC',        address: CHAIN_TOKENS.ethereum.usdc.address, balance: botInfo?.evm?.ethUsdc ?? '0' },
+              { symbol: 'USDT',        address: CHAIN_TOKENS.ethereum.usdt.address, balance: botInfo?.evm?.ethUsdt ?? '0' },
+            ]).map(({ symbol, address, balance }) => {
+              const isSelected = address === null
+                ? withdrawAsset === 'native'
+                : withdrawAsset === 'token' && withdrawToken.toLowerCase() === address.toLowerCase();
+              const bal = parseFloat(balance || '0');
+              return (
+                <button
+                  key={symbol}
+                  type="button"
+                  onClick={() => {
+                    setWithdrawAsset(address === null ? 'native' : 'token');
+                    setWithdrawToken(address ?? '');
+                    setWithdrawAmount('');
+                  }}
+                  className={clsx(
+                    'flex flex-col items-start px-2.5 py-2 rounded-xl text-xs border transition-colors',
+                    isSelected
+                      ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                      : 'border-zinc-800 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200',
+                  )}
+                >
+                  <span className="font-semibold">{symbol}</span>
+                  <span className={clsx('text-[11px] mt-0.5 font-mono',
+                    bal > 0 ? 'text-zinc-400' : 'text-zinc-700')}>
+                    {bal >= 1
+                      ? bal.toLocaleString(undefined, { maximumFractionDigits: 4 })
+                      : bal.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Custom token address override */}
+        {withdrawAsset === 'token' && (
+          <input
+            placeholder="Or paste any ERC-20 address"
+            value={withdrawToken}
+            onChange={e => { setWithdrawToken(e.target.value); setWithdrawAmount(''); }}
+            className="input font-mono text-xs"
+          />
+        )}
+
         <div className="flex gap-2">
-          <input type="number" placeholder="Amount" value={withdrawAmount}
-            onChange={(e) => setWithdrawAmount(e.target.value)} className="input flex-1" />
-          <button onClick={handleWithdraw} disabled={withdrawing || !withdrawAmount}
-            className="btn-primary px-4 text-sm disabled:opacity-40">
+          <input
+            type="number"
+            placeholder="Amount"
+            value={withdrawAmount}
+            onChange={e => setWithdrawAmount(e.target.value)}
+            className="input flex-1"
+          />
+          <button
+            onClick={handleWithdraw}
+            disabled={withdrawing || !withdrawAmount || (!isConnected)}
+            className="btn-primary px-4 text-sm disabled:opacity-40"
+          >
             {withdrawing ? 'Sending…' : 'Withdraw'}
           </button>
         </div>
+
         {isConnected && connectedAddress && (
-          <p className="text-xs text-zinc-600">→ to: <span className="font-mono text-zinc-400">{shortAddr(connectedAddress)}</span></p>
+          <p className="text-xs text-zinc-600">
+            → to: <span className="font-mono text-zinc-400">{shortAddr(connectedAddress)}</span>
+          </p>
         )}
       </div>
     </div>
@@ -506,25 +688,34 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
 
       {/* Bot wallet info */}
       {botInfo?.solana && (
-        <div className="card-sm">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide font-medium mb-3">Bot Solana Wallet</p>
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-xs text-zinc-400 font-mono">{shortAddr(botInfo.solana.address)}</span>
-            <CopyButton text={botInfo.solana.address} />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            {([
-              ['SOL Balance', botInfo.solana.sol + ' SOL'],
-              ...(botInfo.solana.tokenMint ? [['Peg Token', parseFloat(botInfo.solana.tokenBalance).toFixed(4)]] : []),
-              ...(botInfo.solana.stableMint ? [['Stablecoin', parseFloat(botInfo.solana.stableBalance).toFixed(4)]] : []),
-              ['USDC', parseFloat(botInfo.solana.usdcBalance).toFixed(2)],
-              ['USDT', parseFloat(botInfo.solana.usdtBalance).toFixed(2)],
-            ] as [string, string][]).map(([label, value]) => (
-              <div key={label} className="surface">
-                <p className="text-xs text-zinc-600">{label}</p>
-                <p className="text-sm font-mono text-zinc-100 mt-0.5">{value}</p>
+        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/70">
+            <div className="flex items-center gap-2.5">
+              <div className="h-8 w-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 bg-purple-500/20 text-purple-400">
+                S
               </div>
-            ))}
+              <div>
+                <p className="text-xs font-semibold text-zinc-300 leading-none">Bot Wallet</p>
+                <div className="flex items-center gap-1 mt-1">
+                  <span className="text-[11px] text-zinc-500 font-mono">{shortAddr(botInfo.solana.address)}</span>
+                  <CopyButton text={botInfo.solana.address} />
+                </div>
+              </div>
+            </div>
+            <span className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-purple-500/10 text-purple-400">SOL</span>
+          </div>
+
+          {/* Token list */}
+          <div className="divide-y divide-zinc-800/50 px-3">
+            <TokenRow symbol="SOL"  name="Solana"      balance={botInfo.solana.sol} badge="GAS"
+              isLowBal={parseFloat(botInfo.solana.sol) < 0.01} />
+            <TokenRow symbol="wSOL" name="Wrapped SOL" balance={botInfo.solana.wsolBalance ?? '0'} />
+            {botInfo.solana.tokenMint && (
+              <TokenRow symbol="TOKEN" name="Peg Token" balance={botInfo.solana.tokenBalance} badge="PEG" />
+            )}
+            <TokenRow symbol="USDC" name="USD Coin"   balance={botInfo.solana.usdcBalance} />
+            <TokenRow symbol="USDT" name="Tether USD" balance={botInfo.solana.usdtBalance} />
           </div>
         </div>
       )}
@@ -580,38 +771,69 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
         <p className="text-xs text-zinc-500 uppercase tracking-wide font-medium flex items-center gap-2">
           <ArrowUpFromLine className="h-3.5 w-3.5 text-blue-400" /> Withdraw from Bot
         </p>
-        {!connected && <p className="text-xs text-zinc-500">Connect your wallet to set the destination.</p>}
-        <div className="flex gap-2">
-          {(['sol', 'spl'] as const).map((a) => (
-            <button key={a} onClick={() => setWithdrawAsset(a)}
-              className={clsx('flex-1 py-2 rounded-xl text-xs font-medium border transition-colors',
-                withdrawAsset === a ? 'border-brand-500 bg-brand-500/10 text-brand-400' : 'border-zinc-800 text-zinc-500 hover:text-zinc-200')}>
-              {a === 'sol' ? 'SOL' : 'SPL Token'}
-            </button>
-          ))}
-        </div>
-        {withdrawAsset === 'spl' && (
-          <div className="space-y-2">
-            <div className="flex gap-1.5 flex-wrap">
-              {[['USDC', USDC], ['USDT', USDT], ['wSOL', WSOL]].map(([l, m]) => (
-                <button key={l} onClick={() => setWithdrawMint(m)}
-                  className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">{l}</button>
-              ))}
-              {botInfo?.solana?.tokenMint && (
-                <button onClick={() => setWithdrawMint(botInfo.solana!.tokenMint)}
-                  className="px-2 py-1 rounded-lg text-xs bg-brand-500/10 text-brand-400 hover:text-brand-300 transition-colors">
-                  Peg Token
-                </button>
-              )}
-            </div>
-            <input placeholder="Token mint address" value={withdrawMint}
-              onChange={(e) => setWithdrawMint(e.target.value)} className="input font-mono text-xs" />
-          </div>
+        {!connected && (
+          <p className="text-xs text-zinc-500">Connect your wallet above to set the destination address.</p>
         )}
+
+        {/* Token picker */}
+        <div className="space-y-1.5">
+          <p className="text-[11px] text-zinc-600 uppercase tracking-wide font-medium">Choose token</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {([
+              { symbol: 'SOL',  mint: null,  balance: botInfo?.solana?.sol ?? '0' },
+              { symbol: 'wSOL', mint: WSOL,  balance: botInfo?.solana?.wsolBalance ?? '0' },
+              ...(botInfo?.solana?.tokenMint
+                ? [{ symbol: 'TOKEN', mint: botInfo.solana.tokenMint, balance: botInfo.solana.tokenBalance }]
+                : []),
+              { symbol: 'USDC', mint: USDC,  balance: botInfo?.solana?.usdcBalance ?? '0' },
+              { symbol: 'USDT', mint: USDT,  balance: botInfo?.solana?.usdtBalance ?? '0' },
+            ] as { symbol: string; mint: string | null; balance: string }[]).map(({ symbol, mint, balance }) => {
+              const isSelected = mint === null
+                ? withdrawAsset === 'sol'
+                : withdrawAsset === 'spl' && withdrawMint === mint;
+              const bal = parseFloat(balance || '0');
+              return (
+                <button
+                  key={symbol}
+                  type="button"
+                  onClick={() => {
+                    setWithdrawAsset(mint === null ? 'sol' : 'spl');
+                    setWithdrawMint(mint ?? '');
+                    setWithdrawAmount('');
+                  }}
+                  className={clsx(
+                    'flex flex-col items-start px-2.5 py-2 rounded-xl text-xs border transition-colors',
+                    isSelected
+                      ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                      : 'border-zinc-800 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200',
+                  )}
+                >
+                  <span className="font-semibold">{symbol}</span>
+                  <span className={clsx('text-[11px] mt-0.5 font-mono', bal > 0 ? 'text-zinc-400' : 'text-zinc-700')}>
+                    {bal >= 1
+                      ? bal.toLocaleString(undefined, { maximumFractionDigits: 4 })
+                      : bal.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Custom mint override */}
+        {withdrawAsset === 'spl' && (
+          <input
+            placeholder="Or paste any SPL mint address"
+            value={withdrawMint}
+            onChange={e => { setWithdrawMint(e.target.value); setWithdrawAmount(''); }}
+            className="input font-mono text-xs"
+          />
+        )}
+
         <div className="flex gap-2">
           <input type="number" placeholder="Amount" value={withdrawAmount}
-            onChange={(e) => setWithdrawAmount(e.target.value)} className="input flex-1" />
-          <button onClick={handleWithdraw} disabled={withdrawing || !withdrawAmount}
+            onChange={e => setWithdrawAmount(e.target.value)} className="input flex-1" />
+          <button onClick={handleWithdraw} disabled={withdrawing || !withdrawAmount || !connected}
             className="btn-primary px-4 text-sm disabled:opacity-40">
             {withdrawing ? 'Sending…' : 'Withdraw'}
           </button>

@@ -13,9 +13,12 @@ export const dynamic = 'force-dynamic';
 const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)',
 ];
 
-// Individual helpers never throw — a single bad call returns '0', not an error
+// Custom stable — always shown in BSC wallet regardless of peg config
+const CUSTOM_STABLE_ADDR = '0xbDFA0F1B0C42B2C43B31a2C5F1584B1759D48888';
+
 async function getNativeBalance(
   address: string,
   provider: ethers.AbstractProvider
@@ -39,6 +42,20 @@ async function getErc20Balance(
     return ethers.formatUnits(bal, Number(dec));
   } catch {
     return '0';
+  }
+}
+
+async function getErc20Symbol(
+  tokenAddr: string,
+  provider: ethers.AbstractProvider,
+  fallback: string
+): Promise<string> {
+  if (!tokenAddr || !ethers.isAddress(tokenAddr)) return fallback;
+  try {
+    const c = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    return String(await c.symbol());
+  } catch {
+    return fallback;
   }
 }
 
@@ -73,34 +90,48 @@ export async function GET() {
     stableBalance: string;
     tokenAddress: string;
     stableAddress: string;
+    tokenSymbol: string;
+    stableSymbol: string;
     bscUsdc: string;
     bscUsdt: string;
+    bscWbnb: string;
     ethUsdc: string;
     ethUsdt: string;
+    ethWeth: string;
+    customStable: string;
+    customStableSymbol: string;
+    activeChain: string;
   } | undefined;
   let evmError: string | undefined;
 
   try {
-    const signer          = getChainSigner('bsc');
-    const bscProvider     = getChainProvider('bsc');
-    const ethProvider     = getChainProvider('ethereum');
-    const activeProvider  = isEvm ? getChainProvider(chain as 'bsc' | 'ethereum') : bscProvider;
+    const signer         = getChainSigner('bsc');
+    const bscProvider    = getChainProvider('bsc');
+    const ethProvider    = getChainProvider('ethereum');
+    const activeProvider = isEvm ? getChainProvider(chain as 'bsc' | 'ethereum') : bscProvider;
 
-    // Each fetch is independent — one failure returns '0' without blocking the rest
     const [
       bscBal, ethBal,
       tokenBal, stableBal,
-      bscUsdc, bscUsdt,
-      ethUsdc, ethUsdt,
+      bscUsdc, bscUsdt, bscWbnb,
+      ethUsdc, ethUsdt, ethWeth,
+      customStableBal,
+      tokenSym, stableSym, customStableSym,
     ] = await Promise.all([
       getNativeBalance(signer.address, bscProvider),
       getNativeBalance(signer.address, ethProvider),
-      isEvm ? getErc20Balance(signer.address, tokenAddress, activeProvider) : Promise.resolve('0'),
+      isEvm ? getErc20Balance(signer.address, tokenAddress, activeProvider)  : Promise.resolve('0'),
       isEvm ? getErc20Balance(signer.address, stableAddress, activeProvider) : Promise.resolve('0'),
-      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdc.address, bscProvider),
-      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdt.address, bscProvider),
-      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdc.address, ethProvider),
-      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdt.address, ethProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdc.address,    bscProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.usdt.address,    bscProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.bsc.wNative.address, bscProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdc.address,    ethProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.usdt.address,    ethProvider),
+      getErc20Balance(signer.address, CHAIN_TOKENS.ethereum.wNative.address, ethProvider),
+      getErc20Balance(signer.address, CUSTOM_STABLE_ADDR, bscProvider),
+      isEvm && tokenAddress  ? getErc20Symbol(tokenAddress,  activeProvider, '') : Promise.resolve(''),
+      isEvm && stableAddress ? getErc20Symbol(stableAddress, activeProvider, '') : Promise.resolve(''),
+      getErc20Symbol(CUSTOM_STABLE_ADDR, bscProvider, 'MYUSD'),
     ]);
 
     evmData = {
@@ -109,9 +140,15 @@ export async function GET() {
       ethereum:     ethBal,
       tokenBalance: tokenBal,
       stableBalance: stableBal,
-      tokenAddress:  isEvm ? tokenAddress : '',
+      tokenAddress:  isEvm ? tokenAddress  : '',
       stableAddress: isEvm ? stableAddress : '',
-      bscUsdc, bscUsdt, ethUsdc, ethUsdt,
+      tokenSymbol:   tokenSym,
+      stableSymbol:  stableSym,
+      bscUsdc, bscUsdt, bscWbnb,
+      ethUsdc, ethUsdt, ethWeth,
+      customStable:       customStableBal,
+      customStableSymbol: customStableSym,
+      activeChain: chain,
     };
   } catch (e: unknown) {
     evmError = (e as Error).message;
@@ -127,19 +164,21 @@ export async function GET() {
     stableMint: string;
     usdcBalance: string;
     usdtBalance: string;
+    wsolBalance: string;
   } | undefined;
   let solanaError: string | undefined;
 
   try {
-    const keypair = getSolanaKeypair();
-    const conn    = getSolanaConnection();
+    const keypair  = getSolanaKeypair();
+    const conn     = getSolanaConnection();
     const lamports = await conn.getBalance(keypair.publicKey, 'confirmed');
 
-    const [tokenBal, stableBal, usdcBalance, usdtBalance] = await Promise.all([
-      chain === 'solana' ? getSplBalance(keypair.publicKey, tokenAddress) : Promise.resolve('0'),
+    const [tokenBal, stableBal, usdcBalance, usdtBalance, wsolBalance] = await Promise.all([
+      chain === 'solana' ? getSplBalance(keypair.publicKey, tokenAddress)  : Promise.resolve('0'),
       chain === 'solana' ? getSplBalance(keypair.publicKey, stableAddress) : Promise.resolve('0'),
       getSplBalance(keypair.publicKey, CHAIN_TOKENS.solana.usdc.address),
       getSplBalance(keypair.publicKey, CHAIN_TOKENS.solana.usdt.address),
+      getSplBalance(keypair.publicKey, CHAIN_TOKENS.solana.wNative.address),
     ]);
 
     solanaData = {
@@ -147,10 +186,11 @@ export async function GET() {
       sol:          (lamports / LAMPORTS_PER_SOL).toFixed(6),
       tokenBalance: tokenBal,
       stableBalance: stableBal,
-      tokenMint:    chain === 'solana' ? tokenAddress : '',
+      tokenMint:    chain === 'solana' ? tokenAddress  : '',
       stableMint:   chain === 'solana' ? stableAddress : '',
       usdcBalance,
       usdtBalance,
+      wsolBalance,
     };
   } catch (e: unknown) {
     solanaError = (e as Error).message;

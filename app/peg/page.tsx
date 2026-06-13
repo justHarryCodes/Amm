@@ -9,7 +9,7 @@ import { useSSE } from '@/hooks/useSSE';
 import {
   Play, Square, Pause, RotateCcw, CheckCircle, XCircle,
   Clock, ExternalLink, Copy, Check, AlertCircle, Loader2,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, ArrowLeftRight, RefreshCw,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { CHAIN_TOKENS } from '@/lib/tokens';
@@ -36,21 +36,29 @@ interface PegStatus {
   maxDailySpendUsd: number;
   cooldownRemaining: number;
   lastTradeAt: string | null;
-  dailyStats: { totalTrades: number; totalBuyUsd: number; totalSellTokens: number };
+  dailyStats: { totalTrades: number; totalBuyUsd: number; totalSellTokens: number; volumeTrades: number; volumeUsd: number };
   // CoinGecko market data
   marketPriceUsd: number | null;
   cgChange24h:    number | null;
   cgVolume24h:    number | null;
   cgMarketCap:    number | null;
+  // Pool info
+  dexVersion:    string | null;
+  poolFeeTier:   number | null;
+  volumeEnabled:         boolean;
+  volumeIntervalSeconds: number;
 }
 interface PegSettings {
   chain: PegChain; tokenAddress: string; stableAddress: string; pairAddress: string; routerAddress: string;
+  poolFeeTier: number;
   targetPeg: number; upperBand: number; lowerBand: number; maxTradeSizeTokens: number;
   maxDailySpendUsd: number; minLiquidityUsd: number; cooldownSeconds: number; slippageTolerance: number;
+  volumeEnabled: boolean; volumeIntervalSeconds: number; volumeSwapSizeUsd: number;
 }
 interface Trade {
   id: number; timestamp: string; action: string; token_amount: number; stable_amount: number;
-  price_before: number; price_after: number | null; tx_hash: string | null; status: string; error_message?: string;
+  price_before: number; price_after: number | null; tx_hash: string | null; status: string;
+  error_message?: string; is_volume_trade?: boolean;
 }
 
 const EXPLORER: Record<PegChain, (tx: string) => string> = {
@@ -59,7 +67,9 @@ const EXPLORER: Record<PegChain, (tx: string) => string> = {
   solana:   tx => `https://solscan.io/tx/${tx}`,
 };
 const DEX: Record<PegChain, string> = {
-  bsc: CHAIN_TOKENS.bsc.dex, ethereum: CHAIN_TOKENS.ethereum.dex, solana: CHAIN_TOKENS.solana.dex,
+  bsc:      CHAIN_TOKENS.bsc.dex,
+  ethereum: CHAIN_TOKENS.ethereum.dex,
+  solana:   CHAIN_TOKENS.solana.dex,
 };
 const DEFAULT_ROUTER: Record<PegChain, string> = {
   bsc: CHAIN_TOKENS.bsc.router, ethereum: CHAIN_TOKENS.ethereum.router, solana: '',
@@ -303,12 +313,22 @@ export default function PegPage() {
 
         {/* Header */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={clsx('h-2 w-2 rounded-full shrink-0', STATE_DOT[state])} />
             <span className="text-sm font-semibold text-zinc-200">{state.replace(/_/g, ' ')}</span>
             <span className={clsx('badge text-xs', CHAIN_BADGE[chain])}>
               {chain === 'bsc' ? 'BSC' : chain === 'ethereum' ? 'ETH' : 'SOL'} · {DEX[chain]}
             </span>
+            {status?.poolFeeTier ? (
+              <span className="text-xs bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-lg font-mono">
+                {({ 100: '0.01%', 500: '0.05%', 2500: '0.25%', 3000: '0.3%', 10000: '1%' } as Record<number,string>)[status.poolFeeTier] ?? `${status.poolFeeTier/10000}%`}
+              </span>
+            ) : null}
+            {status?.volumeEnabled && state === 'AUTO_TRADE' && (
+              <span className="text-xs bg-brand-500/10 text-brand-400 border border-brand-500/20 px-2 py-0.5 rounded-lg">
+                vol
+              </span>
+            )}
           </div>
           {status?.blockNumber ? (
             <span className="text-xs text-zinc-600 font-mono">#{status.blockNumber.toLocaleString()}</span>
@@ -399,10 +419,12 @@ export default function PegPage() {
           </div>
         )}
 
-        {/* Pool reserves */}
+        {/* Pool reserves / balances */}
         {(status?.tokenReserve != null || status?.stableReserve != null) && (
           <div className="pt-3 border-t border-zinc-800/60">
-            <p className="text-xs text-zinc-600 font-medium mb-2 uppercase tracking-wide">Pool Reserves</p>
+            <p className="text-xs text-zinc-600 font-medium mb-2 uppercase tracking-wide">
+              {status?.dexVersion === 'v3' ? 'Pool Balances (V3)' : 'Pool Reserves'}
+            </p>
             <div className="grid grid-cols-2 gap-2">
               <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2.5">
                 <p className="text-xs text-zinc-500 mb-0.5">{tokSym}</p>
@@ -529,19 +551,49 @@ export default function PegPage() {
 
         {/* 24h summary when running */}
         {status && state !== 'STOPPED' && (
-          <div className="grid grid-cols-3 gap-2 pt-3 border-t border-zinc-800/60 text-center">
-            <div>
-              <p className="text-xs text-zinc-600">24h trades</p>
-              <p className="text-sm font-semibold text-zinc-200 mt-0.5">{status.dailyStats.totalTrades}</p>
+          <div className="pt-3 border-t border-zinc-800/60 space-y-2">
+            {/* Peg correction row */}
+            <p className="text-xs text-zinc-600 font-medium uppercase tracking-wide">24h Peg Correction</p>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <p className="text-xs text-zinc-600">Trades</p>
+                <p className="text-sm font-semibold text-zinc-200 mt-0.5">
+                  {status.dailyStats.totalTrades - (status.dailyStats.volumeTrades ?? 0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-zinc-600">Bought</p>
+                <p className="text-sm font-semibold text-zinc-200 mt-0.5">${fmtNum(status.dailyStats.totalBuyUsd)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-zinc-600">Sold</p>
+                <p className="text-sm font-semibold text-zinc-200 mt-0.5">{fmtNum(status.dailyStats.totalSellTokens)} {tokSym}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-xs text-zinc-600">24h bought</p>
-              <p className="text-sm font-semibold text-zinc-200 mt-0.5">${fmtNum(status.dailyStats.totalBuyUsd)}</p>
-            </div>
-            <div>
-              <p className="text-xs text-zinc-600">24h sold</p>
-              <p className="text-sm font-semibold text-zinc-200 mt-0.5">{fmtNum(status.dailyStats.totalSellTokens)} {tokSym}</p>
-            </div>
+
+            {/* Volume generation row */}
+            {status.volumeEnabled && (
+              <>
+                <p className="text-xs text-zinc-600 font-medium uppercase tracking-wide pt-1">24h Volume Swaps</p>
+                <div className="grid grid-cols-2 gap-2 text-center">
+                  <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2">
+                    <p className="text-xs text-zinc-600">Swap count</p>
+                    <p className="text-sm font-semibold text-brand-400 mt-0.5">
+                      {status.dailyStats.volumeTrades ?? 0}
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-zinc-900 border border-zinc-800/60 px-3 py-2">
+                    <p className="text-xs text-zinc-600">Volume generated</p>
+                    <p className="text-sm font-semibold text-brand-400 mt-0.5">
+                      ${fmtNum(status.dailyStats.volumeUsd ?? 0)}
+                    </p>
+                  </div>
+                </div>
+                <p className="text-xs text-zinc-600 text-center">
+                  every {status.volumeIntervalSeconds}s · alternating BUY/SELL
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -557,41 +609,96 @@ export default function PegPage() {
   );
 }
 
+// ── Resolved token info ───────────────────────────────────────────────────────
+interface ResolvedToken {
+  address: string; symbol: string; name: string; decimals: number; botBalance: number;
+}
+interface ResolvedPool {
+  token0: ResolvedToken; token1: ResolvedToken;
+  fee: number; dexVersion: string;
+  suggestedPeg: 'token0' | 'token1';
+  botAddress: string;
+}
+
+const FEE_LABELS: Record<number, string> = { 100: '0.01%', 500: '0.05%', 2500: '0.25%', 3000: '0.3%', 10000: '1%' };
+
+function fmtBalance(n: number, sym: string) {
+  return `${n.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${sym}`;
+}
+
 // ── Pair Setup Card ───────────────────────────────────────────────────────────
 function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: PegSettings) => Promise<void> }) {
-  const [s, setS]       = useState(settings);
-  const [open, setOpen] = useState(false);
-  const dirty = useRef(false);
+  const [s, setS]         = useState(settings);
+  const [open, setOpen]   = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [pool, setPool]   = useState<ResolvedPool | null>(null);
+  // which of token0/token1 is the "peg token" (the other is stable)
+  const [pegSlot, setPegSlot] = useState<'token0' | 'token1'>('token0');
+  const dirty       = useRef(false);
+  const resolveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Sync from parent only when user hasn't made edits
   useEffect(() => { if (!dirty.current) setS(settings); }, [settings]);
 
-  const str = (k: keyof PegSettings) => (v: string) => {
-    dirty.current = true;
-    if (k === 'tokenAddress' || k === 'stableAddress') {
-      setS(p => ({ ...p, [k]: v, pairAddress: '' }));
-    } else {
-      setS(p => ({ ...p, [k]: v }));
+  // Auto-resolve whenever pairAddress or chain changes (debounced 600 ms)
+  useEffect(() => {
+    if (resolveTimer.current) clearTimeout(resolveTimer.current);
+    const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
+    if (!isEvm || !s.pairAddress.startsWith('0x') || s.pairAddress.length !== 42) {
+      setPool(null); return;
     }
-  };
+    resolveTimer.current = setTimeout(() => void runResolve(s.pairAddress, s.chain as 'bsc' | 'ethereum'), 600);
+    return () => { if (resolveTimer.current) clearTimeout(resolveTimer.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.pairAddress, s.chain]);
+
+  async function runResolve(pairAddr: string, chain: 'bsc' | 'ethereum') {
+    setResolving(true);
+    try {
+      const res = await fetch(`/api/peg/resolve-pair?pairAddress=${encodeURIComponent(pairAddr)}&chain=${chain}`);
+      if (!res.ok) throw new Error((await res.json() as { error: string }).error);
+      const data = await res.json() as ResolvedPool;
+      setPool(data);
+      applyPegSlot(data, data.suggestedPeg);
+    } catch (e: unknown) {
+      toast.error(`Pool not found: ${(e as Error).message}`);
+      setPool(null);
+    }
+    setResolving(false);
+  }
+
+  function applyPegSlot(p: ResolvedPool, slot: 'token0' | 'token1') {
+    const peg    = p[slot];
+    const stable = slot === 'token0' ? p.token1 : p.token0;
+    dirty.current = true;
+    setPegSlot(slot);
+    setS(prev => ({ ...prev, tokenAddress: peg.address, stableAddress: stable.address, poolFeeTier: p.fee }));
+  }
+
+  function swapRoles() {
+    if (!pool) return;
+    applyPegSlot(pool, pegSlot === 'token0' ? 'token1' : 'token0');
+  }
+
   const num = (k: keyof PegSettings) => (e: React.ChangeEvent<HTMLInputElement>) => {
     dirty.current = true; setS(p => ({ ...p, [k]: parseFloat(e.target.value) || 0 }));
   };
 
   function switchChain(c: PegChain) {
     dirty.current = false;
-    setS(p => ({ ...p, chain: c, tokenAddress: '', pairAddress: '',
-      stableAddress: c === 'solana' ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' : '',
+    setPool(null);
+    setS(p => ({ ...p, chain: c, tokenAddress: '', stableAddress: '', pairAddress: '',
       routerAddress: DEFAULT_ROUTER[c] }));
   }
 
-  const stables = [
-    ['USDC', CHAIN_TOKENS[s.chain].usdc.address],
-    ['USDT', CHAIN_TOKENS[s.chain].usdt.address],
-    [CHAIN_TOKENS[s.chain].wNative.symbol, CHAIN_TOKENS[s.chain].wNative.address],
-  ] as [string, string][];
+  // Solana still uses manual mint inputs
+  const str = (k: keyof PegSettings) => (v: string) => {
+    dirty.current = true;
+    setS(p => ({ ...p, [k]: v }));
+  };
 
-  const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
-  const pairOk = !isEvm || (s.pairAddress.startsWith('0x') && s.pairAddress.length === 42);
+  const isEvm  = s.chain === 'bsc' || s.chain === 'ethereum';
+  const pairOk = s.pairAddress.startsWith('0x') && s.pairAddress.length === 42;
 
   return (
     <form onSubmit={async (e) => { e.preventDefault(); await onSave(s); dirty.current = false; }} className="card space-y-4">
@@ -599,61 +706,146 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
 
       <ChainTabs value={s.chain} onChange={switchChain} />
 
-      <TokenBox
-        label="Token to Peg"
-        value={s.tokenAddress}
-        placeholder={s.chain === 'solana' ? 'Token mint address…' : '0x token contract…'}
-        onChange={str('tokenAddress')}
-        chain={s.chain}
-      />
-
-      {/* Stable picker */}
-      <div>
-        <p className="text-xs text-zinc-500 mb-2 font-medium">Paired With</p>
-        <div className="flex gap-2 mb-2">
-          {stables.map(([label, addr]) => (
-            <button key={label} type="button"
-              onClick={() => { dirty.current = true; setS(p => ({ ...p, stableAddress: addr, pairAddress: '' })); }}
-              className={clsx('flex-1 py-1.5 rounded-xl text-xs font-semibold border transition-colors',
-                s.stableAddress === addr
-                  ? 'border-brand-500 bg-brand-500/10 text-brand-400'
-                  : 'border-zinc-800 text-zinc-500 hover:text-zinc-300')}>
-              {label}
-            </button>
-          ))}
-        </div>
-        <TokenBox
-          label="Stable Address"
-          value={s.stableAddress}
-          placeholder={s.chain === 'solana' ? 'Stable mint…' : '0x stable contract…'}
-          onChange={str('stableAddress')}
-          chain={s.chain}
-          showBalance={false}
-        />
-      </div>
-
-      {/* Pair address — required for EVM */}
-      {isEvm && (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-xs text-zinc-500 font-medium">
-              DEX Pair Address <span className="text-red-400">*</span>
-            </p>
-            {pairOk && s.pairAddress && (
-              <span className="flex items-center gap-1 text-xs text-brand-400 font-medium">
-                <CheckCircle className="h-3.5 w-3.5" /> Set
-              </span>
+      {/* ── EVM: pool address is the single entry point ── */}
+      {isEvm ? (
+        <div className="space-y-3">
+          {/* Pool address input */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-zinc-500 font-medium">
+                {DEX[s.chain]} Pool Address <span className="text-red-400">*</span>
+              </p>
+              {pool && (
+                <span className="flex items-center gap-1.5 text-xs text-zinc-500 font-mono">
+                  <span className={clsx('px-1.5 py-0.5 rounded text-xs font-medium',
+                    pool.dexVersion === 'v3' ? 'bg-brand-500/10 text-brand-400' : 'bg-zinc-800 text-zinc-400')}>
+                    {pool.dexVersion.toUpperCase()}
+                  </span>
+                  {FEE_LABELS[pool.fee] ?? `${pool.fee / 10000}%`}
+                </span>
+              )}
+            </div>
+            <div className="relative">
+              <input
+                className={clsx('input font-mono text-xs pr-8',
+                  !pairOk && s.pairAddress ? 'border-red-500/50' : '')}
+                placeholder="Paste pool contract address (0x…)"
+                value={s.pairAddress}
+                onChange={e => { dirty.current = true; setS(p => ({ ...p, pairAddress: e.target.value })); }}
+              />
+              {resolving && (
+                <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 animate-spin text-zinc-500" />
+              )}
+            </div>
+            {!pool && !resolving && (
+              <p className="mt-1.5 text-xs text-zinc-600">
+                Create your pool on {DEX[s.chain]}, then paste the pool address — token details will auto-fill.
+              </p>
             )}
           </div>
-          <input
-            className={clsx('input font-mono text-xs', !pairOk && s.pairAddress ? 'border-red-500/50' : '')}
-            placeholder={`Paste your ${DEX[s.chain]} pair address here…`}
-            value={s.pairAddress}
-            onChange={e => { dirty.current = true; setS(p => ({ ...p, pairAddress: e.target.value })); }}
+
+          {/* Resolved token cards */}
+          {resolving && !pool && (
+            <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 flex items-center gap-3">
+              <Loader2 className="h-4 w-4 animate-spin text-zinc-500 shrink-0" />
+              <p className="text-sm text-zinc-500">Reading pool contract…</p>
+            </div>
+          )}
+
+          {pool && (
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                {(['token0', 'token1'] as const).map(slot => {
+                  const tk      = pool[slot];
+                  const isPeg   = pegSlot === slot;
+                  const roleLabel = isPeg ? 'Peg Token' : 'Stable';
+                  return (
+                    <div key={slot}
+                      className={clsx('rounded-2xl border p-3 space-y-2.5 transition-all',
+                        isPeg
+                          ? 'border-brand-500/50 bg-brand-500/5'
+                          : 'border-zinc-800 bg-zinc-900'
+                      )}>
+                      {/* Role badge + symbol */}
+                      <div className="flex items-start justify-between gap-1">
+                        <div className="min-w-0">
+                          <p className="text-base font-bold text-zinc-100 leading-tight truncate">{tk.symbol}</p>
+                          <p className="text-xs text-zinc-500 truncate">{tk.name}</p>
+                        </div>
+                        <span className={clsx('shrink-0 text-xs px-2 py-0.5 rounded-lg font-medium whitespace-nowrap',
+                          isPeg ? 'bg-brand-500/20 text-brand-400' : 'bg-zinc-800 text-zinc-400')}>
+                          {roleLabel}
+                        </span>
+                      </div>
+
+                      {/* Address */}
+                      <div className="flex items-center gap-1 bg-zinc-800/60 rounded-xl px-2 py-1.5">
+                        <span className="text-xs font-mono text-zinc-500 flex-1 min-w-0 truncate">
+                          {tk.address.slice(0, 6)}…{tk.address.slice(-4)}
+                        </span>
+                        <CopyBtn text={tk.address} />
+                      </div>
+
+                      {/* Decimals */}
+                      <p className="text-xs text-zinc-600">{tk.decimals} decimals</p>
+
+                      {/* Bot balance */}
+                      <div className={clsx('rounded-xl px-2.5 py-1.5 text-xs font-medium',
+                        tk.botBalance > 0 ? 'bg-brand-500/10 text-brand-400' : 'bg-amber-500/10 text-amber-400')}>
+                        {tk.botBalance > 0
+                          ? `Bot: ${fmtBalance(tk.botBalance, tk.symbol)}`
+                          : `Bot has no ${tk.symbol}`}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Swap roles + refresh */}
+              <div className="flex gap-2">
+                <button type="button" onClick={swapRoles}
+                  className="flex-1 btn-ghost text-xs py-2 flex items-center justify-center gap-1.5">
+                  <ArrowLeftRight className="h-3.5 w-3.5" />
+                  Swap Roles
+                </button>
+                <button type="button"
+                  onClick={() => void runResolve(s.pairAddress, s.chain as 'bsc' | 'ethereum')}
+                  disabled={resolving}
+                  className="btn-ghost text-xs py-2 px-3 flex items-center gap-1.5 disabled:opacity-40">
+                  <RefreshCw className={clsx('h-3.5 w-3.5', resolving && 'animate-spin')} />
+                  Refresh
+                </button>
+              </div>
+
+              {/* Bot wallet address hint */}
+              {pool.botAddress && (
+                <div className="flex items-center gap-1.5 px-1">
+                  <p className="text-xs text-zinc-600">Bot wallet:</p>
+                  <span className="text-xs font-mono text-zinc-500">{pool.botAddress.slice(0, 8)}…{pool.botAddress.slice(-6)}</span>
+                  <CopyBtn text={pool.botAddress} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ── Solana: manual mint inputs ── */
+        <div className="space-y-3">
+          <TokenBox
+            label="Token to Peg (mint)"
+            value={s.tokenAddress}
+            placeholder="Token mint address…"
+            onChange={str('tokenAddress')}
+            chain={s.chain}
           />
-          <p className="mt-1.5 text-xs text-zinc-600">
-            Create your pool on {DEX[s.chain]}, then paste the pair address above.
-          </p>
+          <TokenBox
+            label="Stable Mint"
+            value={s.stableAddress}
+            placeholder="Stable mint (USDC, USDT…)"
+            onChange={str('stableAddress')}
+            chain={s.chain}
+            showBalance={false}
+          />
         </div>
       )}
 
@@ -669,28 +861,59 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
         </div>
       </div>
 
-      {/* Advanced limits */}
+      {/* Advanced limits + volume */}
       <div className="border border-zinc-800 rounded-xl overflow-hidden">
         <button type="button" onClick={() => setOpen(v => !v)}
           className="flex items-center justify-between w-full px-4 py-3 text-xs text-zinc-500 font-medium">
-          Advanced Limits
+          Advanced Limits &amp; Volume
           {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
         </button>
         {open && (
-          <div className="px-4 pb-4 grid grid-cols-2 gap-3 border-t border-zinc-800">
-            {([
-              ['Max trade (tokens)',  'maxTradeSizeTokens',  '1'],
-              ['Daily limit ($)',     'maxDailySpendUsd',    '1'],
-              ['Min liquidity ($)',   'minLiquidityUsd',     '100'],
-              ['Cooldown (s)',        'cooldownSeconds',     '1'],
-              ['Slippage',           'slippageTolerance',   '0.001'],
-              ['Lower band',         'lowerBand',           '0.001'],
-            ] as [string, keyof PegSettings, string][]).map(([label, key, step]) => (
-              <div key={key} className="pt-3">
-                <label className="block text-xs text-zinc-500 mb-1">{label}</label>
-                <input type="number" step={step} value={s[key] as number} onChange={num(key)} className="input" />
+          <div className="px-4 pb-4 border-t border-zinc-800 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              {([
+                ['Max trade (tokens)',  'maxTradeSizeTokens',  '1'],
+                ['Daily limit ($)',     'maxDailySpendUsd',    '1'],
+                ['Min liquidity ($)',   'minLiquidityUsd',     '1'],
+                ['Cooldown (s)',        'cooldownSeconds',     '1'],
+                ['Slippage',           'slippageTolerance',   '0.001'],
+                ['Lower band',         'lowerBand',           '0.001'],
+              ] as [string, keyof PegSettings, string][]).map(([label, key, step]) => (
+                <div key={key} className="pt-3">
+                  <label className="block text-xs text-zinc-500 mb-1">{label}</label>
+                  <input type="number" step={step} value={s[key] as number} onChange={num(key)} className="input" />
+                </div>
+              ))}
+            </div>
+
+            {/* Volume generation */}
+            <div className="pt-3 border-t border-zinc-800/60">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <p className="text-xs font-medium text-zinc-300">Volume Generation</p>
+                  <p className="text-xs text-zinc-600 mt-0.5">Alternating buy/sell to create organic-looking volume</p>
+                </div>
+                <button type="button"
+                  onClick={() => { dirty.current = true; setS(p => ({ ...p, volumeEnabled: !p.volumeEnabled })); }}
+                  className={clsx('relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors',
+                    s.volumeEnabled ? 'bg-brand-500' : 'bg-zinc-700')}>
+                  <span className={clsx('pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                    s.volumeEnabled ? 'translate-x-4' : 'translate-x-0')} />
+                </button>
               </div>
-            ))}
+              {s.volumeEnabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-zinc-500 mb-1">Swap size ($)</label>
+                    <input type="number" step="1" min="1" value={s.volumeSwapSizeUsd} onChange={num('volumeSwapSizeUsd')} className="input" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-500 mb-1">Interval (s)</label>
+                    <input type="number" step="10" min="30" value={s.volumeIntervalSeconds} onChange={num('volumeIntervalSeconds')} className="input" />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -720,12 +943,17 @@ function TradeHistory({ trades, chain }: { trades: Trade[]; chain: PegChain }) {
                 <div key={t.id} className="surface flex items-center gap-3">
                   <div className={clsx(
                     'h-8 w-8 rounded-xl flex items-center justify-center shrink-0 text-xs font-bold',
-                    t.action === 'BUY' ? 'bg-brand-500/10 text-brand-400' : 'bg-red-500/10 text-red-400',
+                    t.is_volume_trade
+                      ? 'bg-purple-500/10 text-purple-400'
+                      : t.action === 'BUY' ? 'bg-brand-500/10 text-brand-400' : 'bg-red-500/10 text-red-400',
                   )}>
-                    {t.action === 'BUY' ? 'B' : 'S'}
+                    {t.is_volume_trade ? 'V' : t.action === 'BUY' ? 'B' : 'S'}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 text-xs">
+                      {t.is_volume_trade && (
+                        <span className="text-xs bg-purple-500/10 text-purple-400 px-1.5 py-0.5 rounded font-medium">VOL</span>
+                      )}
                       <span className="text-zinc-200 font-medium">{Number(t.token_amount).toFixed(2)} tokens</span>
                       <span className="text-zinc-600">${Number(t.stable_amount).toFixed(4)}</span>
                       {t.price_after != null && (

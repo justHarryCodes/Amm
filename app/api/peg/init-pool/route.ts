@@ -1,22 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { pegMaintainer } from '@/lib/services/pegMaintainer';
 
 export const runtime = 'nodejs';
 
-export async function POST(req: NextRequest) {
-  try {
-    const { tokenAmount, stableAmount } = await req.json();
-
-    if (!tokenAmount || !stableAmount || tokenAmount <= 0 || stableAmount <= 0)
-      return NextResponse.json({ error: 'tokenAmount and stableAmount must be positive numbers' }, { status: 400 });
-
-    const result = await pegMaintainer.initializePool(
-      Number(tokenAmount),
-      Number(stableAmount)
-    );
-
-    return NextResponse.json(result);
-  } catch (e: unknown) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 500 });
-  }
+// V3 concentrated-liquidity pools must be created through the DEX UI (PancakeSwap V3 / Uniswap V3).
+// The bot does not create pools — paste the pool address in the Bot Setup form instead.
+export async function POST() {
+  const { chain } = pegMaintainer.settings;
+  const dex = chain === 'bsc' ? 'PancakeSwap V3' : 'Uniswap V3';
+  const url = chain === 'bsc'
+    ? 'https://pancakeswap.finance/add'
+    : 'https://app.uniswap.org/add/v3';
+  return NextResponse.json(
+    { error: `V3 pools require concentrated-liquidity positions. Create the pool on ${dex} (${url}), then paste the pool address in Bot Setup.` },
+    { status: 400 }
+  );
 }

@@ -6,8 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "migrate": "tsx lib/db/migrate.ts",
-    "postinstall": "echo 'install complete'"
+    "migrate": "tsx lib/db/migrate.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.1.3",

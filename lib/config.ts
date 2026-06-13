@@ -41,7 +41,7 @@ export const config = {
     lowerBand:           parseFloat(opt('LOWER_BAND',            '0.02')),
     maxTradeSizeTokens:  parseFloat(opt('MAX_TRADE_SIZE_TOKENS', '1000')),
     maxDailySpendUsd:    parseFloat(opt('MAX_DAILY_SPEND_USD',   '500')),
-    minLiquidityUsd:     parseFloat(opt('MIN_LIQUIDITY_USD',     '5000')),
+    minLiquidityUsd:     parseFloat(opt('MIN_LIQUIDITY_USD',     '2')),
     cooldownSeconds:     parseInt(  opt('COOLDOWN_SECONDS',      '300')),
     slippageTolerance:   parseFloat(opt('SLIPPAGE_TOLERANCE',    '0.005')),
   },

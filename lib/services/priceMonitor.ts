@@ -7,26 +7,27 @@ import { query } from '../db/client';
 import { fetchSolanaPrice } from '../solana/jupiterPeg';
 import { fetchCgPrices, type CgMap, type CgPrice } from './coinGecko';
 
-import PAIR_ABI from '../abi/PancakeV2Pair.json';
+import V2_PAIR_ABI  from '../abi/PancakeV2Pair.json';
+import V3_POOL_ABI  from '../abi/UniswapV3Pool.json';
 
 export interface PriceSnapshot {
   timestamp:    Date;
-  price:        number;   // DEX spot price = stableReserve / tokenReserve (trading price)
+  price:        number;   // DEX spot price = stableReserve / tokenReserve (or V3 sqrtPriceX96 equivalent)
   tokenReserve: number;
   stableReserve:number;
-  liquidityUsd: number;   // tokenR × cgTokenUsd + stableR × cgStableUsd
+  liquidityUsd: number;
   chain:        PegChain;
   tokenSymbol:  string;
   stableSymbol: string;
   blockNumber:  number;
+  dexVersion:   'v2' | 'v3' | 'unknown';
   // CoinGecko market data — null when CG is unavailable / token not listed
-  marketPriceUsd: number | null;  // CoinGecko USD price (market-wide, not just this DEX)
-  cgChange24h:    number | null;  // 24-hour % price change
-  cgVolume24h:    number | null;  // 24-hour USD trading volume
-  cgMarketCap:    number | null;  // USD market cap
+  marketPriceUsd: number | null;
+  cgChange24h:    number | null;
+  cgVolume24h:    number | null;
+  cgMarketCap:    number | null;
 }
 
-// Minimal view of settings needed for price monitoring
 export interface PriceMonitorConfig {
   chain:         PegChain;
   tokenAddress:  string;
@@ -36,18 +37,38 @@ export interface PriceMonitorConfig {
 
 const ERC20_DEC = ['function decimals() view returns (uint8)'];
 const ERC20_SYM = ['function symbol() view returns (string)'];
+const ERC20_BAL = ['function balanceOf(address) view returns (uint256)'];
+
+// Convert V3 sqrtPriceX96 → human-readable price of the peg token in stable
+function sqrtPriceX96ToHuman(
+  sqrtPriceX96: bigint,
+  token0Decimals: number,
+  token1Decimals: number,
+  tokenIsToken0: boolean,
+): number {
+  // Q64.96 → floating point: price of 1 wei token0 in wei token1
+  const sqrtFloat = Number(sqrtPriceX96) / Number(2n ** 96n);
+  const rawPrice  = sqrtFloat * sqrtFloat;
+  // Adjust for decimals → price of 1 whole token0 in whole token1
+  const adjusted  = rawPrice * Math.pow(10, token0Decimals - token1Decimals);
+  // adjusted = (stable per token) if token is token0, else (token per stable)
+  return tokenIsToken0 ? adjusted : 1 / adjusted;
+}
 
 class PriceMonitor extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   lastSnapshot: PriceSnapshot | null = null;
 
-  private initKey:      string | null = null;
-  private activeConfig: PriceMonitorConfig | null = null;
-  private tokenIsToken0  = true;
+  private initKey:       string | null = null;
+  private activeConfig:  PriceMonitorConfig | null = null;
+  private poolVersion:   'v2' | 'v3' = 'v3';
+  private tokenIsToken0 = true;
   private tokenDecimals  = 18;
   private stableDecimals = 18;
   private tokenSymbol    = '';
   private stableSymbol   = '';
+
+  getPoolVersion(): 'v2' | 'v3' { return this.poolVersion; }
 
   async initialize(cfg: PriceMonitorConfig): Promise<void> {
     const key = `${cfg.chain}:${cfg.tokenAddress}:${cfg.pairAddress}`;
@@ -59,18 +80,33 @@ class PriceMonitor extends EventEmitter {
       if (!cfg.stableAddress) throw new Error(`Stable address required for ${cfg.chain}`);
 
       const provider = getChainProvider(cfg.chain);
-      // Use the inputted pair address directly — validate it answers token0()
-      const pair = new ethers.Contract(cfg.pairAddress, PAIR_ABI, provider);
+
+      // Probe pool version: V3 pools expose slot0(), V2 pools expose getReserves()
+      let detectedVersion: 'v2' | 'v3' = 'v3';
+      try {
+        const probe = new ethers.Contract(cfg.pairAddress, V3_POOL_ABI, provider);
+        await probe.slot0();
+        detectedVersion = 'v3';
+      } catch {
+        detectedVersion = 'v2';
+      }
+      this.poolVersion = detectedVersion;
+
+      const pairContract = new ethers.Contract(
+        cfg.pairAddress,
+        detectedVersion === 'v3' ? V3_POOL_ABI : V2_PAIR_ABI,
+        provider,
+      );
 
       const [t0, tDec, sDec, tSym, sSym] = await Promise.all([
-        pair.token0() as Promise<string>,
+        pairContract.token0() as Promise<string>,
         new ethers.Contract(cfg.tokenAddress,  ERC20_DEC, provider).decimals(),
         new ethers.Contract(cfg.stableAddress, ERC20_DEC, provider).decimals(),
         new ethers.Contract(cfg.tokenAddress,  ERC20_SYM, provider).symbol().catch(() => 'TOKEN'),
         new ethers.Contract(cfg.stableAddress, ERC20_SYM, provider).symbol().catch(() => 'STABLE'),
       ]);
 
-      this.tokenIsToken0  = t0.toLowerCase() === cfg.tokenAddress.toLowerCase();
+      this.tokenIsToken0  = (t0 as string).toLowerCase() === cfg.tokenAddress.toLowerCase();
       this.tokenDecimals  = Number(tDec);
       this.stableDecimals = Number(sDec);
       this.tokenSymbol    = tSym as string;
@@ -84,6 +120,7 @@ class PriceMonitor extends EventEmitter {
     this.activeConfig = { ...cfg };
     logger.info('PriceMonitor initialized', {
       chain: cfg.chain,
+      version: this.poolVersion,
       pair:  cfg.pairAddress.slice(0, 10) + '…',
       token: cfg.tokenAddress.slice(0, 10) + '…',
       tokenIsToken0: this.tokenIsToken0,
@@ -96,142 +133,192 @@ class PriceMonitor extends EventEmitter {
     return this._getEvmPrice(c as 'bsc' | 'ethereum');
   }
 
-  // Shared helper: turn raw getReserves() output + decimals into human-readable amounts
-  private static _parseReserves(
-    reserves: { reserve0: bigint; reserve1: bigint } | bigint[],
-    tokenIsToken0: boolean,
-    tokenDecimals: number,
-    stableDecimals: number,
-  ): { tokenR: number; stableR: number } {
-    // ethers v6 Result supports both named and indexed access
-    const raw0 = BigInt(((reserves as { reserve0: bigint }).reserve0 ?? (reserves as bigint[])[0]).toString());
-    const raw1 = BigInt(((reserves as { reserve1: bigint }).reserve1 ?? (reserves as bigint[])[1]).toString());
-    const tokenRaw  = tokenIsToken0 ? raw0 : raw1;
-    const stableRaw = tokenIsToken0 ? raw1 : raw0;
-    return {
-      tokenR:  parseFloat(ethers.formatUnits(tokenRaw,  tokenDecimals)),
-      stableR: parseFloat(ethers.formatUnits(stableRaw, stableDecimals)),
-    };
-  }
-
-  // Shared helper: DEX spot price + liquidity from reserves + CoinGecko data
-  private static _calcPriceAndLiquidity(
-    tokenR: number, stableR: number,
-    tokenAddr: string, stableAddr: string,
+  // ── V3 price from slot0 ─────────────────────────────────────────────────────
+  private async _getV3Price(
+    provider: ethers.Provider,
+    cfg: PriceMonitorConfig,
     cgPrices: CgMap,
-  ): { dexPrice: number; liquidityUsd: number; cgToken: CgPrice | null; cgStable: CgPrice | null } {
-    // Spot price: how many stable tokens buy 1 token (the actual trading price on this pair)
-    const dexPrice = tokenR > 0 ? stableR / tokenR : 0;
+    blockNumber: number,
+  ): Promise<PriceSnapshot> {
+    const pool = new ethers.Contract(cfg.pairAddress, V3_POOL_ABI, provider);
+    const slot0 = await pool.slot0();
+    const sqrtPriceX96 = BigInt(slot0[0].toString());
 
-    const cgToken  = cgPrices[tokenAddr.toLowerCase()]  ?? null;
-    const cgStable = cgPrices[stableAddr.toLowerCase()] ?? null;
+    const price = sqrtPriceX96ToHuman(
+      sqrtPriceX96,
+      this.tokenDecimals,
+      this.stableDecimals,
+      this.tokenIsToken0,
+    );
 
-    // USD price of 1 stable token (USDT/USDC ≈ 1, WBNB = $300+, etc.)
-    const stableUsd = cgStable?.usd ?? 1.0;
-    // USD price of 1 project token — prefer CoinGecko, fallback to DEX price × stable
-    const tokenUsd  = cgToken?.usd ?? (dexPrice * stableUsd);
+    // Use ERC20 balanceOf(pool) as "reserves" — gives total token depth in pool
+    const [tokenRaw, stableRaw] = await Promise.all([
+      new ethers.Contract(cfg.tokenAddress,  ERC20_BAL, provider).balanceOf(cfg.pairAddress) as Promise<bigint>,
+      new ethers.Contract(cfg.stableAddress, ERC20_BAL, provider).balanceOf(cfg.pairAddress) as Promise<bigint>,
+    ]);
+    const tokenR  = parseFloat(ethers.formatUnits(tokenRaw,  this.tokenDecimals));
+    const stableR = parseFloat(ethers.formatUnits(stableRaw, this.stableDecimals));
 
-    // Accurate pool liquidity = sum of both sides at real USD prices
+    const cgToken  = cgPrices[cfg.tokenAddress.toLowerCase()]  ?? null;
+    const cgStable = cgPrices[cfg.stableAddress.toLowerCase()] ?? null;
+    const stableUsd   = cgStable?.usd ?? 1.0;
+    const tokenUsd    = cgToken?.usd  ?? (price * stableUsd);
     const liquidityUsd = tokenR * tokenUsd + stableR * stableUsd;
 
-    return { dexPrice, liquidityUsd, cgToken, cgStable };
-  }
-
-  // Live price read using the active (initialized) config
-  private async _getEvmPrice(chain: 'bsc' | 'ethereum'): Promise<PriceSnapshot> {
-    const cfg = this.activeConfig!;
-    const provider = getChainProvider(chain);
-    const pair = new ethers.Contract(cfg.pairAddress, PAIR_ABI, provider);
-
-    const [[reserves, blockNumber], cgPrices] = await Promise.all([
-      Promise.all([pair.getReserves(), provider.getBlockNumber()]),
-      fetchCgPrices(chain, [cfg.tokenAddress, cfg.stableAddress]).catch((): CgMap => ({})),
-    ]);
-
-    const { tokenR, stableR } = PriceMonitor._parseReserves(
-      reserves as { reserve0: bigint; reserve1: bigint },
-      this.tokenIsToken0, this.tokenDecimals, this.stableDecimals,
-    );
-    const { dexPrice, liquidityUsd, cgToken } = PriceMonitor._calcPriceAndLiquidity(
-      tokenR, stableR, cfg.tokenAddress, cfg.stableAddress, cgPrices,
-    );
-
-    const snap: PriceSnapshot = {
-      timestamp: new Date(), price: dexPrice,
+    return {
+      timestamp: new Date(), price,
       tokenReserve: tokenR, stableReserve: stableR, liquidityUsd,
-      chain,
+      chain: cfg.chain,
       tokenSymbol:  this.tokenSymbol,
       stableSymbol: this.stableSymbol,
-      blockNumber:  blockNumber as number,
+      blockNumber,
+      dexVersion: 'v3',
       marketPriceUsd: cgToken?.usd            ?? null,
       cgChange24h:    cgToken?.usd_24h_change ?? null,
       cgVolume24h:    cgToken?.usd_24h_vol    ?? null,
       cgMarketCap:    cgToken?.usd_market_cap ?? null,
     };
+  }
+
+  // ── V2 price from getReserves ───────────────────────────────────────────────
+  private async _getV2Price(
+    provider: ethers.Provider,
+    cfg: PriceMonitorConfig,
+    cgPrices: CgMap,
+    blockNumber: number,
+  ): Promise<PriceSnapshot> {
+    const pair = new ethers.Contract(cfg.pairAddress, V2_PAIR_ABI, provider);
+    const reserves = await pair.getReserves();
+
+    const raw0 = BigInt(reserves[0].toString());
+    const raw1 = BigInt(reserves[1].toString());
+    const tokenRaw  = this.tokenIsToken0 ? raw0 : raw1;
+    const stableRaw = this.tokenIsToken0 ? raw1 : raw0;
+    const tokenR  = parseFloat(ethers.formatUnits(tokenRaw,  this.tokenDecimals));
+    const stableR = parseFloat(ethers.formatUnits(stableRaw, this.stableDecimals));
+    const price   = tokenR > 0 ? stableR / tokenR : 0;
+
+    const cgToken  = cgPrices[cfg.tokenAddress.toLowerCase()]  ?? null;
+    const cgStable = cgPrices[cfg.stableAddress.toLowerCase()] ?? null;
+    const stableUsd   = cgStable?.usd ?? 1.0;
+    const tokenUsd    = cgToken?.usd  ?? (price * stableUsd);
+    const liquidityUsd = tokenR * tokenUsd + stableR * stableUsd;
+
+    return {
+      timestamp: new Date(), price,
+      tokenReserve: tokenR, stableReserve: stableR, liquidityUsd,
+      chain: cfg.chain,
+      tokenSymbol:  this.tokenSymbol,
+      stableSymbol: this.stableSymbol,
+      blockNumber,
+      dexVersion: 'v2',
+      marketPriceUsd: cgToken?.usd            ?? null,
+      cgChange24h:    cgToken?.usd_24h_change ?? null,
+      cgVolume24h:    cgToken?.usd_24h_vol    ?? null,
+      cgMarketCap:    cgToken?.usd_market_cap ?? null,
+    };
+  }
+
+  private async _getEvmPrice(chain: 'bsc' | 'ethereum'): Promise<PriceSnapshot> {
+    const cfg      = this.activeConfig!;
+    const provider = getChainProvider(chain);
+
+    const [blockNumber, cgPrices] = await Promise.all([
+      provider.getBlockNumber(),
+      fetchCgPrices(chain, [cfg.tokenAddress, cfg.stableAddress]).catch((): CgMap => ({})),
+    ]);
+
+    const snap = this.poolVersion === 'v3'
+      ? await this._getV3Price(provider, cfg, cgPrices, blockNumber)
+      : await this._getV2Price(provider, cfg, cgPrices, blockNumber);
+
     this.lastSnapshot = snap;
     this.emit('price', snap);
     return snap;
   }
 
   // Cold read — does NOT require the monitor to be started.
-  // Used by the status and dashboard APIs when the bot is stopped.
   async getOnChainPrice(cfg: PriceMonitorConfig): Promise<PriceSnapshot> {
     if (cfg.chain !== 'bsc' && cfg.chain !== 'ethereum') {
       throw new Error('Solana on-chain price requires active monitor');
     }
     const provider = getChainProvider(cfg.chain);
-    const pair = new ethers.Contract(cfg.pairAddress, PAIR_ABI, provider);
 
     const ERC20_META = [
       'function decimals() view returns (uint8)',
       'function symbol()   view returns (string)',
     ];
 
-    // Fetch everything in one round-trip: pair metadata + ERC20 metadata + CoinGecko
-    const [
-      [t0, reserves, blockNumber, tokenDec, stableDec, tokenSym, stableSym],
-      cgPrices,
-    ] = await Promise.all([
-      Promise.all([
-        pair.token0()                                                                                    as Promise<string>,
-        pair.getReserves(),
-        provider.getBlockNumber(),
-        new ethers.Contract(cfg.tokenAddress,  ERC20_META, provider).decimals().catch(() => BigInt(18)) as Promise<bigint>,
-        new ethers.Contract(cfg.stableAddress, ERC20_META, provider).decimals().catch(() => BigInt(18)) as Promise<bigint>,
-        new ethers.Contract(cfg.tokenAddress,  ERC20_META, provider).symbol().catch(() => 'TOKEN')      as Promise<string>,
-        new ethers.Contract(cfg.stableAddress, ERC20_META, provider).symbol().catch(() => 'STABLE')     as Promise<string>,
-      ]),
+    // Detect V2 or V3
+    let version: 'v2' | 'v3' = 'v3';
+    try {
+      const probe = new ethers.Contract(cfg.pairAddress, V3_POOL_ABI, provider);
+      await probe.slot0();
+    } catch {
+      version = 'v2';
+    }
+
+    const pairContract = new ethers.Contract(
+      cfg.pairAddress,
+      version === 'v3' ? V3_POOL_ABI : V2_PAIR_ABI,
+      provider,
+    );
+
+    const [t0, blockNumber, tokenDec, stableDec, tokenSym, stableSym, cgPrices] = await Promise.all([
+      pairContract.token0()                                                                                    as Promise<string>,
+      provider.getBlockNumber(),
+      new ethers.Contract(cfg.tokenAddress,  ERC20_META, provider).decimals().catch(() => BigInt(18)) as Promise<bigint>,
+      new ethers.Contract(cfg.stableAddress, ERC20_META, provider).decimals().catch(() => BigInt(18)) as Promise<bigint>,
+      new ethers.Contract(cfg.tokenAddress,  ERC20_META, provider).symbol().catch(() => 'TOKEN')      as Promise<string>,
+      new ethers.Contract(cfg.stableAddress, ERC20_META, provider).symbol().catch(() => 'STABLE')     as Promise<string>,
       fetchCgPrices(cfg.chain as 'bsc' | 'ethereum', [cfg.tokenAddress, cfg.stableAddress]).catch((): CgMap => ({})),
     ]);
 
     const tokenIsToken0 = (t0 as string).toLowerCase() === cfg.tokenAddress.toLowerCase();
-    const tDec = Math.max(1, Number(tokenDec));   // guard: decimals must be ≥ 1
+    const tDec = Math.max(1, Number(tokenDec));
     const sDec = Math.max(1, Number(stableDec));
 
-    const { tokenR, stableR } = PriceMonitor._parseReserves(
-      reserves as { reserve0: bigint; reserve1: bigint },
-      tokenIsToken0, tDec, sDec,
-    );
-    const { dexPrice, liquidityUsd, cgToken } = PriceMonitor._calcPriceAndLiquidity(
-      tokenR, stableR, cfg.tokenAddress, cfg.stableAddress, cgPrices,
-    );
+    let price = 0, tokenR = 0, stableR = 0;
+
+    if (version === 'v3') {
+      const slot0 = await (pairContract as ethers.Contract).slot0();
+      price  = sqrtPriceX96ToHuman(BigInt(slot0[0].toString()), tDec, sDec, tokenIsToken0);
+      const [tokenRaw, stableRaw] = await Promise.all([
+        new ethers.Contract(cfg.tokenAddress,  ERC20_BAL, provider).balanceOf(cfg.pairAddress) as Promise<bigint>,
+        new ethers.Contract(cfg.stableAddress, ERC20_BAL, provider).balanceOf(cfg.pairAddress) as Promise<bigint>,
+      ]);
+      tokenR  = parseFloat(ethers.formatUnits(tokenRaw,  tDec));
+      stableR = parseFloat(ethers.formatUnits(stableRaw, sDec));
+    } else {
+      const reserves = await (pairContract as ethers.Contract).getReserves();
+      const raw0 = BigInt(reserves[0].toString());
+      const raw1 = BigInt(reserves[1].toString());
+      const tokenRaw  = tokenIsToken0 ? raw0 : raw1;
+      const stableRaw = tokenIsToken0 ? raw1 : raw0;
+      tokenR  = parseFloat(ethers.formatUnits(tokenRaw,  tDec));
+      stableR = parseFloat(ethers.formatUnits(stableRaw, sDec));
+      price   = tokenR > 0 ? stableR / tokenR : 0;
+    }
+
+    const cgToken  = cgPrices[cfg.tokenAddress.toLowerCase()]  ?? null;
+    const cgStable = cgPrices[cfg.stableAddress.toLowerCase()] ?? null;
+    const stableUsd   = cgStable?.usd ?? 1.0;
+    const tokenUsd    = cgToken?.usd  ?? (price * stableUsd);
+    const liquidityUsd = tokenR * tokenUsd + stableR * stableUsd;
 
     logger.info('getOnChainPrice', {
-      pair: cfg.pairAddress.slice(0, 10),
-      tokenIsToken0,
-      tokenR: tokenR.toFixed(4),
-      stableR: stableR.toFixed(4),
-      dexPrice: dexPrice.toFixed(8),
-      liquidityUsd: liquidityUsd.toFixed(2),
+      version, pair: cfg.pairAddress.slice(0, 10),
+      tokenIsToken0, dexPrice: price.toFixed(8),
     });
 
     return {
-      timestamp: new Date(), price: dexPrice,
+      timestamp: new Date(), price,
       tokenReserve: tokenR, stableReserve: stableR, liquidityUsd,
       chain: cfg.chain,
       tokenSymbol:  tokenSym as string,
       stableSymbol: stableSym as string,
       blockNumber:  blockNumber as number,
+      dexVersion:   version,
       marketPriceUsd: cgToken?.usd            ?? null,
       cgChange24h:    cgToken?.usd_24h_change ?? null,
       cgVolume24h:    cgToken?.usd_24h_vol    ?? null,
@@ -245,7 +332,7 @@ class PriceMonitor extends EventEmitter {
     const snap: PriceSnapshot = {
       timestamp: result.timestamp, price: result.price,
       tokenReserve: 0, stableReserve: 0, liquidityUsd: 0,
-      chain: 'solana',
+      chain: 'solana', dexVersion: 'unknown',
       tokenSymbol: '', stableSymbol: '', blockNumber: 0,
       marketPriceUsd: null, cgChange24h: null, cgVolume24h: null, cgMarketCap: null,
     };
@@ -256,7 +343,7 @@ class PriceMonitor extends EventEmitter {
 
   getLastSnapshot() { return this.lastSnapshot; }
 
-  // AMM constant-product math (Uniswap V2: k = r × s)
+  // AMM math — V2 constant-product approximation (used as trade-size estimator)
   calcSellAmount(snap: PriceSnapshot, target: number): number {
     const { tokenReserve: r, stableReserve: s } = snap;
     if (snap.chain === 'solana' || r === 0 || s === 0)
