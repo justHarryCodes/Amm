@@ -3,21 +3,13 @@ import { pegMaintainer } from '@/lib/services/pegMaintainer';
 import { priceMonitor } from '@/lib/services/priceMonitor';
 import { bulkSender } from '@/lib/services/bulkSender';
 import { solanaBulkSender } from '@/lib/services/solanaBulkSender';
-import { config } from '@/lib/config';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  // Only enforce auth when a non-default API_SECRET is configured.
-  // EventSource can't send custom headers so the key travels as a query param.
-  const usingCustomSecret = config.apiSecret !== 'dev-secret';
-  if (usingCustomSecret) {
-    const key = req.nextUrl.searchParams.get('key');
-    if (key !== config.apiSecret) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
-    }
-  }
+  // Auth handled by middleware (checks __session cookie).
+  // EventSource sends cookies automatically — no extra check needed here.
 
   const encoder = new TextEncoder();
   let closed = false;

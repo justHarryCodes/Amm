@@ -957,7 +957,7 @@ function TradeHistory({ trades, chain }: { trades: Trade[]; chain: PegChain }) {
                       <span className="text-zinc-200 font-medium">{Number(t.token_amount).toFixed(2)} tokens</span>
                       <span className="text-zinc-600">${Number(t.stable_amount).toFixed(4)}</span>
                       {t.price_after != null && (
-                        <span className="text-zinc-600">→ ${t.price_after.toFixed(6)}</span>
+                        <span className="text-zinc-600">→ ${Number(t.price_after).toFixed(6)}</span>
                       )}
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
