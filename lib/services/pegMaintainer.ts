@@ -478,9 +478,9 @@ class PegMaintainer extends EventEmitter {
     this.emit('trade', rec);
   }
 
-  // ── EVM trade via 0x DEX aggregator ──────────────────────────────────────
-  // Uses 0x to find the best swap route across all DEXes.
-  // Price monitoring still uses PancakeSwap pool data (priceMonitor).
+  // ── EVM trade via KyberSwap DEX aggregator ───────────────────────────────
+  // Flow: pair address → token0/token1 → KyberSwap finds best route → swap.
+  // Price monitoring still reads from the PancakeSwap pool (priceMonitor).
 
   private async _executeEvmTrade(
     chain: 'bsc' | 'ethereum',
@@ -501,71 +501,72 @@ class PegMaintainer extends EventEmitter {
       Number(await new ethers.Contract(stableAddress, erc20Dec, provider).decimals()),
     ]);
 
-    const sellToken = action === 'SELL' ? tokenAddress  : stableAddress;
-    const buyToken  = action === 'SELL' ? stableAddress : tokenAddress;
-    const dec       = action === 'SELL' ? tokenDec      : stableDec;
-    const sellAmount = ethers.parseUnits(amount.toFixed(dec), dec);
+    // BUY  = spend stable, receive token
+    // SELL = spend token,  receive stable
+    const sellToken  = action === 'SELL' ? tokenAddress  : stableAddress;
+    const buyToken   = action === 'SELL' ? stableAddress : tokenAddress;
+    const sellDec    = action === 'SELL' ? tokenDec      : stableDec;
+    const buyDec     = action === 'SELL' ? stableDec     : tokenDec;
+    const sellAmount = ethers.parseUnits(amount.toFixed(sellDec), sellDec);
 
-    // ── Fetch 0x quote ──────────────────────────────────────────────────────
-    const ZEROX_BASE: Record<'bsc' | 'ethereum', string> = {
-      bsc:      'https://bsc.api.0x.org',
-      ethereum: 'https://api.0x.org',
+    const KYBER_BASE: Record<'bsc' | 'ethereum', string> = {
+      bsc:      'https://aggregator-api.kyberswap.com/bsc',
+      ethereum: 'https://aggregator-api.kyberswap.com/ethereum',
     };
-    const apiKey  = process.env.ZEROX_API_KEY ?? '';
-    const qs      = new URLSearchParams({
-      sellToken,
-      buyToken,
-      sellAmount:   sellAmount.toString(),
-      takerAddress: signer.address,
-      slippagePercentage: slippage.toString(),
-    });
-    const quoteUrl = `${ZEROX_BASE[chain]}/swap/v1/quote?${qs}`;
-    logger.info('Fetching 0x quote', { chain, action, sellAmount: sellAmount.toString() });
+    const base = KYBER_BASE[chain];
+    const slippageBps = Math.round(slippage * 10000); // e.g. 0.005 → 50 bps
 
-    const res = await fetch(quoteUrl, {
-      headers: { ...(apiKey ? { '0x-api-key': apiKey } : {}) },
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`0x quote failed (${res.status}): ${body}`);
-    }
-    const quote = await res.json() as {
-      to: string;
-      data: string;
-      value: string;
-      allowanceTarget: string;
-      buyAmount: string;
-      price: string;
-    };
-    logger.info('0x quote received', {
-      chain, action,
-      to:    quote.to,
-      price: quote.price,
-      buyAmount: quote.buyAmount,
-      allowanceTarget: quote.allowanceTarget,
-    });
+    // ── Step 1: get route ───────────────────────────────────────────────────
+    logger.info('KyberSwap: fetching route', { chain, action, sellToken, buyToken, sellAmount: sellAmount.toString() });
+    const routeRes = await fetch(
+      `${base}/api/v1/routes?tokenIn=${sellToken}&tokenOut=${buyToken}&amountIn=${sellAmount.toString()}`,
+      { headers: { 'User-Agent': 'pegbot/1.0' } },
+    );
+    if (!routeRes.ok) throw new Error(`KyberSwap route error (${routeRes.status}): ${await routeRes.text()}`);
+    const routeJson = await routeRes.json() as { code: number; message: string; data: { routeSummary: unknown; routerAddress: string } };
+    if (routeJson.code !== 0) throw new Error(`KyberSwap route failed: ${routeJson.message}`);
+    const { routeSummary, routerAddress } = routeJson.data;
+    logger.info('KyberSwap: route found', { chain, action, routerAddress });
 
-    // ── Approve the allowanceTarget (may differ from the swap contract) ─────
-    await ensureApproval(sellToken, quote.allowanceTarget, sellAmount, chain);
+    // ── Step 2: build transaction ───────────────────────────────────────────
+    const buildRes = await fetch(`${base}/api/v1/route/build`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'pegbot/1.0', 'Origin': 'https://kyberswap.com' },
+      body: JSON.stringify({
+        routeSummary,
+        sender:            signer.address,
+        recipient:         signer.address,
+        slippageTolerance: slippageBps,
+      }),
+    });
+    if (!buildRes.ok) throw new Error(`KyberSwap build error (${buildRes.status}): ${await buildRes.text()}`);
+    const buildJson = await buildRes.json() as { code: number; message: string; data: { data: string; amountOut: string; routerAddress: string } };
+    if (buildJson.code !== 0) throw new Error(`KyberSwap build failed: ${buildJson.message}`);
+    const { data: txData, amountOut, routerAddress: txRouter } = buildJson.data;
+    logger.info('KyberSwap: tx built', { chain, action, amountOut, router: txRouter });
 
-    // ── Execute swap ────────────────────────────────────────────────────────
+    // ── Step 3: approve sell token to the KyberSwap router ─────────────────
+    const spender = txRouter || routerAddress;
+    await ensureApproval(sellToken, spender, sellAmount, chain);
+
+    // ── Step 4: send transaction ────────────────────────────────────────────
     const tx = await signer.sendTransaction({
-      to:    quote.to,
-      data:  quote.data,
-      value: BigInt(quote.value ?? '0'),
+      to:    spender,
+      data:  txData,
+      value: 0n,
       ...overrides,
     });
     rec.txHash = tx.hash;
-    logger.info('0x swap submitted', { chain, action, txHash: tx.hash });
-
+    logger.info('KyberSwap swap submitted', { chain, action, txHash: tx.hash });
     await tx.wait();
 
+    const bought = parseFloat(ethers.formatUnits(amountOut ?? '0', buyDec));
     if (action === 'SELL') {
       rec.tokenAmount  = amount;
-      rec.stableAmount = parseFloat(ethers.formatUnits(quote.buyAmount, stableDec));
+      rec.stableAmount = bought;
     } else {
       rec.stableAmount = amount;
-      rec.tokenAmount  = parseFloat(ethers.formatUnits(quote.buyAmount, tokenDec));
+      rec.tokenAmount  = bought;
     }
 
     const after = await priceMonitor.getPrice(chain);
