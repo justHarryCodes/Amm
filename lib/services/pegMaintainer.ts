@@ -438,7 +438,13 @@ class PegMaintainer extends EventEmitter {
 
   private async _evalSell(snap: PriceSnapshot): Promise<void> {
     const { targetPeg, maxTradeSizeTokens, slippageTolerance } = this.settings;
-    const amount  = Math.min(priceMonitor.calcSellAmount(snap, targetPeg), maxTradeSizeTokens);
+    // V3: calcSellAmount uses V2 constant-product math on total balanceOf reserves.
+    // Out-of-range V3 positions inflate tokenReserve → formula goes negative → returns 0.
+    // For V3 use maxTradeSizeTokens directly; the bot re-checks each tick until in-band.
+    const ideal  = priceMonitor.calcSellAmount(snap, targetPeg);
+    const amount = priceMonitor.getPoolVersion() === 'v3' || ideal <= 0
+      ? maxTradeSizeTokens
+      : Math.min(ideal, maxTradeSizeTokens);
     const blocked = this._checkSafety('SELL', amount * snap.price, snap);
     if (blocked) { logger.info('SELL blocked', { reason: blocked }); return; }
     await this._executeTrade('SELL', amount, snap, slippageTolerance);
@@ -446,13 +452,13 @@ class PegMaintainer extends EventEmitter {
 
   private async _evalBuy(snap: PriceSnapshot): Promise<void> {
     const { targetPeg, maxTradeSizeTokens, maxDailySpendUsd, slippageTolerance } = this.settings;
-    // Cap in USD at the *target* price, not spot price — otherwise a cheap token
-    // (e.g. $0.0005) reduces the cap to near-zero and buys can never move the peg.
-    const amount  = Math.min(
-      priceMonitor.calcBuyAmount(snap, targetPeg),
-      maxTradeSizeTokens * targetPeg,
-      maxDailySpendUsd - this.dailySpendUsd,
-    );
+    // V3: calcBuyAmount over-inflates due to out-of-range tokens in balanceOf reserves.
+    // Cap to maxTradeSizeTokens * targetPeg (USD at peg price); bot re-checks each tick.
+    const maxUsd = Math.min(maxTradeSizeTokens * targetPeg, maxDailySpendUsd - this.dailySpendUsd);
+    const ideal  = priceMonitor.calcBuyAmount(snap, targetPeg);
+    const amount = priceMonitor.getPoolVersion() === 'v3' || ideal <= 0
+      ? maxUsd
+      : Math.min(ideal, maxUsd);
     const blocked = this._checkSafety('BUY', amount, snap);
     if (blocked) { logger.info('BUY blocked', { reason: blocked }); return; }
     await this._executeTrade('BUY', amount, snap, slippageTolerance);
