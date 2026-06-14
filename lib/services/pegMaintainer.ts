@@ -446,9 +446,11 @@ class PegMaintainer extends EventEmitter {
 
   private async _evalBuy(snap: PriceSnapshot): Promise<void> {
     const { targetPeg, maxTradeSizeTokens, maxDailySpendUsd, slippageTolerance } = this.settings;
+    // Cap in USD at the *target* price, not spot price — otherwise a cheap token
+    // (e.g. $0.0005) reduces the cap to near-zero and buys can never move the peg.
     const amount  = Math.min(
       priceMonitor.calcBuyAmount(snap, targetPeg),
-      maxTradeSizeTokens * snap.price,
+      maxTradeSizeTokens * targetPeg,
       maxDailySpendUsd - this.dailySpendUsd,
     );
     const blocked = this._checkSafety('BUY', amount, snap);
