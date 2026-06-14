@@ -478,7 +478,9 @@ class PegMaintainer extends EventEmitter {
     this.emit('trade', rec);
   }
 
-  // ── EVM trade — auto-detects V2 vs V3 and routes accordingly ──────────────
+  // ── EVM trade via 0x DEX aggregator ──────────────────────────────────────
+  // Uses 0x to find the best swap route across all DEXes.
+  // Price monitoring still uses PancakeSwap pool data (priceMonitor).
 
   private async _executeEvmTrade(
     chain: 'bsc' | 'ethereum',
@@ -488,117 +490,90 @@ class PegMaintainer extends EventEmitter {
     slippage: number,
     rec: TradeRecord
   ): Promise<void> {
-    const { tokenAddress, stableAddress, pairAddress } = this.settings;
-    let { poolFeeTier } = this.settings;
-    const signer   = getChainSigner(chain);
-    const provider = signer.provider!;
+    const { tokenAddress, stableAddress } = this.settings;
+    const signer    = getChainSigner(chain);
+    const provider  = signer.provider!;
     const overrides = await txOverrides(chain);
 
     const erc20Dec = ['function decimals() view returns (uint8)'];
-    const erc20Allowance = [
-      'function approve(address,uint256) returns (bool)',
-      'function allowance(address,address) view returns (uint256)',
-    ];
-
     const [tokenDec, stableDec] = await Promise.all([
       Number(await new ethers.Contract(tokenAddress,  erc20Dec, provider).decimals()),
       Number(await new ethers.Contract(stableAddress, erc20Dec, provider).decimals()),
     ]);
 
-    const deadline   = Math.floor(Date.now() / 1000) + 300;
-    const poolVer    = priceMonitor.getPoolVersion();
+    const sellToken = action === 'SELL' ? tokenAddress  : stableAddress;
+    const buyToken  = action === 'SELL' ? stableAddress : tokenAddress;
+    const dec       = action === 'SELL' ? tokenDec      : stableDec;
+    const sellAmount = ethers.parseUnits(amount.toFixed(dec), dec);
 
-    let tx: { hash: string; wait: () => Promise<unknown> };
+    // ── Fetch 0x quote ──────────────────────────────────────────────────────
+    const ZEROX_BASE: Record<'bsc' | 'ethereum', string> = {
+      bsc:      'https://bsc.api.0x.org',
+      ethereum: 'https://api.0x.org',
+    };
+    const apiKey  = process.env.ZEROX_API_KEY ?? '';
+    const qs      = new URLSearchParams({
+      sellToken,
+      buyToken,
+      sellAmount:   sellAmount.toString(),
+      takerAddress: signer.address,
+      slippagePercentage: slippage.toString(),
+    });
+    const quoteUrl = `${ZEROX_BASE[chain]}/swap/v1/quote?${qs}`;
+    logger.info('Fetching 0x quote', { chain, action, sellAmount: sellAmount.toString() });
 
-    if (poolVer === 'v2') {
-      // ── V2 swap (PancakeSwap V2 / Uniswap V2) ──────────────────────────────
-      const V2_ROUTER: Record<'bsc' | 'ethereum', string> = {
-        bsc:      '0x10ED43C718714eb63d5aA57B78B54704E256024E',
-        ethereum: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
-      };
-      const V2_ABI = [
-        'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[] amounts)',
-        'function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)',
-      ];
-      const v2Router    = new ethers.Contract(V2_ROUTER[chain], V2_ABI, signer);
-      const v2RouterAddr = V2_ROUTER[chain];
-
-      if (action === 'SELL') {
-        const amtIn = ethers.parseUnits(amount.toFixed(tokenDec), tokenDec);
-        const tok = new ethers.Contract(tokenAddress, erc20Allowance, signer);
-        if ((await tok.allowance(signer.address, v2RouterAddr)) < amtIn) {
-          const t = await tok.approve(v2RouterAddr, ethers.MaxUint256, overrides); await t.wait();
-        }
-        tx = await v2Router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
-          amtIn, 0n, [tokenAddress, stableAddress], signer.address, deadline, overrides,
-        );
-        rec.tokenAmount  = amount;
-        rec.stableAmount = amount * snap.price;
-      } else {
-        const amtIn = ethers.parseUnits(amount.toFixed(stableDec), stableDec);
-        const stb = new ethers.Contract(stableAddress, erc20Allowance, signer);
-        if ((await stb.allowance(signer.address, v2RouterAddr)) < amtIn) {
-          const t = await stb.approve(v2RouterAddr, ethers.MaxUint256, overrides); await t.wait();
-        }
-        tx = await v2Router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
-          amtIn, 0n, [stableAddress, tokenAddress], signer.address, deadline, overrides,
-        );
-        rec.stableAmount = amount;
-        rec.tokenAmount  = snap.price > 0 ? amount / snap.price : 0;
-      }
-
-      logger.info('EVM V2 trade submitted', { chain, action, txHash: tx.hash });
-    } else {
-      // ── V3 swap (PancakeSwap V3 / Uniswap V3) ──────────────────────────────
-      // Auto-read fee tier from pool if not set in settings
-      if (!poolFeeTier && pairAddress) {
-        try {
-          const pool = new ethers.Contract(pairAddress, V3_POOL_ABI, provider);
-          poolFeeTier = Number(await pool.fee());
-          this.settings.poolFeeTier = poolFeeTier; // cache for next trade
-          logger.info('Auto-detected V3 pool fee', { fee: poolFeeTier });
-        } catch {
-          poolFeeTier = CHAIN_TOKENS[chain].defaultFeeTier;
-        }
-      }
-      const fee          = poolFeeTier || CHAIN_TOKENS[chain].defaultFeeTier;
-      const routerAddress = getRouter(chain);
-      const routerAbi     = chain === 'bsc' ? PANCAKE_V3_ROUTER_ABI : UNISWAP_V3_ROUTER_ABI;
-      const router        = new ethers.Contract(routerAddress, routerAbi, signer);
-
-      await ensureApproval(tokenAddress,  routerAddress, ethers.MaxUint256, chain);
-      await ensureApproval(stableAddress, routerAddress, ethers.MaxUint256, chain);
-
-      if (action === 'SELL') {
-        const amtIn = ethers.parseUnits(amount.toFixed(tokenDec), tokenDec);
-        const params = chain === 'bsc'
-          ? { tokenIn: tokenAddress, tokenOut: stableAddress, fee, recipient: signer.address, amountIn: amtIn, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n }
-          : { tokenIn: tokenAddress, tokenOut: stableAddress, fee, recipient: signer.address, deadline, amountIn: amtIn, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n };
-        tx = await router.exactInputSingle(params, overrides);
-        rec.tokenAmount  = amount;
-        rec.stableAmount = amount * snap.price;
-      } else {
-        const amtIn = ethers.parseUnits(amount.toFixed(stableDec), stableDec);
-        const params = chain === 'bsc'
-          ? { tokenIn: stableAddress, tokenOut: tokenAddress, fee, recipient: signer.address, amountIn: amtIn, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n }
-          : { tokenIn: stableAddress, tokenOut: tokenAddress, fee, recipient: signer.address, deadline, amountIn: amtIn, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n };
-        tx = await router.exactInputSingle(params, overrides);
-        rec.stableAmount = amount;
-        rec.tokenAmount  = snap.price > 0 ? amount / snap.price : 0;
-      }
-
-      logger.info('EVM V3 trade submitted', { chain, action, fee, txHash: tx.hash });
+    const res = await fetch(quoteUrl, {
+      headers: { ...(apiKey ? { '0x-api-key': apiKey } : {}) },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`0x quote failed (${res.status}): ${body}`);
     }
+    const quote = await res.json() as {
+      to: string;
+      data: string;
+      value: string;
+      allowanceTarget: string;
+      buyAmount: string;
+      price: string;
+    };
+    logger.info('0x quote received', {
+      chain, action,
+      to:    quote.to,
+      price: quote.price,
+      buyAmount: quote.buyAmount,
+      allowanceTarget: quote.allowanceTarget,
+    });
 
+    // ── Approve the allowanceTarget (may differ from the swap contract) ─────
+    await ensureApproval(sellToken, quote.allowanceTarget, sellAmount, chain);
+
+    // ── Execute swap ────────────────────────────────────────────────────────
+    const tx = await signer.sendTransaction({
+      to:    quote.to,
+      data:  quote.data,
+      value: BigInt(quote.value ?? '0'),
+      ...overrides,
+    });
     rec.txHash = tx.hash;
+    logger.info('0x swap submitted', { chain, action, txHash: tx.hash });
+
     await tx.wait();
+
+    if (action === 'SELL') {
+      rec.tokenAmount  = amount;
+      rec.stableAmount = parseFloat(ethers.formatUnits(quote.buyAmount, stableDec));
+    } else {
+      rec.stableAmount = amount;
+      rec.tokenAmount  = parseFloat(ethers.formatUnits(quote.buyAmount, tokenDec));
+    }
 
     const after = await priceMonitor.getPrice(chain);
     rec.priceAfter = after.price;
     rec.status     = 'SUCCESS';
     this.lastTradeAt = new Date();
     if (action === 'BUY') this.dailySpendUsd += amount;
-    logger.info('EVM trade confirmed', { chain, action, poolVer, txHash: tx.hash });
+    logger.info('0x swap confirmed', { chain, action, txHash: tx.hash });
   }
 
   // ── Solana trade (via Jupiter) ─────────────────────────────────────────────
