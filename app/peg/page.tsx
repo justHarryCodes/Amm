@@ -643,16 +643,17 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
   // Auto-resolve whenever pairAddress or chain changes (debounced 600 ms)
   useEffect(() => {
     if (resolveTimer.current) clearTimeout(resolveTimer.current);
-    const isEvm = s.chain === 'bsc' || s.chain === 'ethereum';
-    if (!isEvm || !s.pairAddress.startsWith('0x') || s.pairAddress.length !== 42) {
-      setPool(null); return;
-    }
-    resolveTimer.current = setTimeout(() => void runResolve(s.pairAddress, s.chain as 'bsc' | 'ethereum'), 600);
+    const isEvm    = s.chain === 'bsc' || s.chain === 'ethereum';
+    const isSolana = s.chain === 'solana';
+    const validEvm     = isEvm    && s.pairAddress.startsWith('0x') && s.pairAddress.length === 42;
+    const validSolana  = isSolana && s.pairAddress.length >= 32 && s.pairAddress.length <= 44 && !s.pairAddress.startsWith('0x');
+    if (!validEvm && !validSolana) { setPool(null); return; }
+    resolveTimer.current = setTimeout(() => void runResolve(s.pairAddress, s.chain), 600);
     return () => { if (resolveTimer.current) clearTimeout(resolveTimer.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.pairAddress, s.chain]);
 
-  async function runResolve(pairAddr: string, chain: 'bsc' | 'ethereum') {
+  async function runResolve(pairAddr: string, chain: PegChain) {
     setResolving(true);
     try {
       const res = await fetch(`/api/peg/resolve-pair?pairAddress=${encodeURIComponent(pairAddr)}&chain=${chain}`);
@@ -697,8 +698,20 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
     setS(p => ({ ...p, [k]: v }));
   };
 
-  const isEvm  = s.chain === 'bsc' || s.chain === 'ethereum';
-  const pairOk = s.pairAddress.startsWith('0x') && s.pairAddress.length === 42;
+  const isEvm    = s.chain === 'bsc' || s.chain === 'ethereum';
+  const isSolana = s.chain === 'solana';
+  const pairOk   = isEvm
+    ? (s.pairAddress.startsWith('0x') && s.pairAddress.length === 42)
+    : isSolana
+    ? (s.pairAddress.length >= 32 && s.pairAddress.length <= 44)
+    : false;
+
+  const poolPlaceholder = isEvm
+    ? `Paste pool contract address (0x…)`
+    : `Paste Raydium pool address…`;
+  const poolHint = isEvm
+    ? `Create your pool on ${DEX[s.chain]}, then paste the pool address — token details will auto-fill.`
+    : `Create your pool on Raydium, then paste the pool address — token details will auto-fill.`;
 
   return (
     <form onSubmit={async (e) => { e.preventDefault(); await onSave(s); dirty.current = false; }} className="card space-y-4">
@@ -706,148 +719,121 @@ function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: Peg
 
       <ChainTabs value={s.chain} onChange={switchChain} />
 
-      {/* ── EVM: pool address is the single entry point ── */}
-      {isEvm ? (
-        <div className="space-y-3">
-          {/* Pool address input */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs text-zinc-500 font-medium">
-                {DEX[s.chain]} Pool Address <span className="text-red-400">*</span>
-              </p>
-              {pool && (
-                <span className="flex items-center gap-1.5 text-xs text-zinc-500 font-mono">
-                  <span className={clsx('px-1.5 py-0.5 rounded text-xs font-medium',
-                    pool.dexVersion === 'v3' ? 'bg-brand-500/10 text-brand-400' : 'bg-zinc-800 text-zinc-400')}>
-                    {pool.dexVersion.toUpperCase()}
-                  </span>
-                  {FEE_LABELS[pool.fee] ?? `${pool.fee / 10000}%`}
+      {/* ── Pool address input (EVM + Solana) ── */}
+      <div className="space-y-3">
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs text-zinc-500 font-medium">
+              {DEX[s.chain]} Pool Address <span className="text-red-400">*</span>
+            </p>
+            {pool && (
+              <span className="flex items-center gap-1.5 text-xs text-zinc-500 font-mono">
+                <span className={clsx('px-1.5 py-0.5 rounded text-xs font-medium',
+                  pool.dexVersion === 'v3' || pool.dexVersion === 'clmm'
+                    ? 'bg-brand-500/10 text-brand-400'
+                    : isSolana
+                    ? 'bg-purple-500/10 text-purple-400'
+                    : 'bg-zinc-800 text-zinc-400')}>
+                  {pool.dexVersion.toUpperCase()}
                 </span>
-              )}
-            </div>
-            <div className="relative">
-              <input
-                className={clsx('input font-mono text-xs pr-8',
-                  !pairOk && s.pairAddress ? 'border-red-500/50' : '')}
-                placeholder="Paste pool contract address (0x…)"
-                value={s.pairAddress}
-                onChange={e => { dirty.current = true; setS(p => ({ ...p, pairAddress: e.target.value })); }}
-              />
-              {resolving && (
-                <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 animate-spin text-zinc-500" />
-              )}
-            </div>
-            {!pool && !resolving && (
-              <p className="mt-1.5 text-xs text-zinc-600">
-                Create your pool on {DEX[s.chain]}, then paste the pool address — token details will auto-fill.
-              </p>
+                {isEvm && (FEE_LABELS[pool.fee] ?? `${pool.fee / 10000}%`)}
+              </span>
             )}
           </div>
-
-          {/* Resolved token cards */}
-          {resolving && !pool && (
-            <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 flex items-center gap-3">
-              <Loader2 className="h-4 w-4 animate-spin text-zinc-500 shrink-0" />
-              <p className="text-sm text-zinc-500">Reading pool contract…</p>
-            </div>
+          <div className="relative">
+            <input
+              className={clsx('input font-mono text-xs pr-8',
+                !pairOk && s.pairAddress ? 'border-red-500/50' : '')}
+              placeholder={poolPlaceholder}
+              value={s.pairAddress}
+              onChange={e => { dirty.current = true; setS(p => ({ ...p, pairAddress: e.target.value })); }}
+            />
+            {resolving && (
+              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 animate-spin text-zinc-500" />
+            )}
+          </div>
+          {!pool && !resolving && (
+            <p className="mt-1.5 text-xs text-zinc-600">{poolHint}</p>
           )}
+        </div>
 
-          {pool && (
-            <div className="space-y-2">
-              <div className="grid grid-cols-2 gap-2">
-                {(['token0', 'token1'] as const).map(slot => {
-                  const tk      = pool[slot];
-                  const isPeg   = pegSlot === slot;
-                  const roleLabel = isPeg ? 'Peg Token' : 'Stable';
-                  return (
-                    <div key={slot}
-                      className={clsx('rounded-2xl border p-3 space-y-2.5 transition-all',
-                        isPeg
-                          ? 'border-brand-500/50 bg-brand-500/5'
-                          : 'border-zinc-800 bg-zinc-900'
-                      )}>
-                      {/* Role badge + symbol */}
-                      <div className="flex items-start justify-between gap-1">
-                        <div className="min-w-0">
-                          <p className="text-base font-bold text-zinc-100 leading-tight truncate">{tk.symbol}</p>
-                          <p className="text-xs text-zinc-500 truncate">{tk.name}</p>
-                        </div>
-                        <span className={clsx('shrink-0 text-xs px-2 py-0.5 rounded-lg font-medium whitespace-nowrap',
-                          isPeg ? 'bg-brand-500/20 text-brand-400' : 'bg-zinc-800 text-zinc-400')}>
-                          {roleLabel}
-                        </span>
+        {/* Resolved token cards */}
+        {resolving && !pool && (
+          <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 flex items-center gap-3">
+            <Loader2 className="h-4 w-4 animate-spin text-zinc-500 shrink-0" />
+            <p className="text-sm text-zinc-500">Reading pool{isSolana ? '' : ' contract'}…</p>
+          </div>
+        )}
+
+        {pool && (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              {(['token0', 'token1'] as const).map(slot => {
+                const tk        = pool[slot];
+                const isPeg     = pegSlot === slot;
+                const roleLabel = isPeg ? 'Peg Token' : 'Stable';
+                return (
+                  <div key={slot}
+                    className={clsx('rounded-2xl border p-3 space-y-2.5 transition-all',
+                      isPeg ? 'border-brand-500/50 bg-brand-500/5' : 'border-zinc-800 bg-zinc-900'
+                    )}>
+                    <div className="flex items-start justify-between gap-1">
+                      <div className="min-w-0">
+                        <p className="text-base font-bold text-zinc-100 leading-tight truncate">{tk.symbol}</p>
+                        <p className="text-xs text-zinc-500 truncate">{tk.name}</p>
                       </div>
-
-                      {/* Address */}
-                      <div className="flex items-center gap-1 bg-zinc-800/60 rounded-xl px-2 py-1.5">
-                        <span className="text-xs font-mono text-zinc-500 flex-1 min-w-0 truncate">
-                          {tk.address.slice(0, 6)}…{tk.address.slice(-4)}
-                        </span>
-                        <CopyBtn text={tk.address} />
-                      </div>
-
-                      {/* Decimals */}
-                      <p className="text-xs text-zinc-600">{tk.decimals} decimals</p>
-
-                      {/* Bot balance */}
-                      <div className={clsx('rounded-xl px-2.5 py-1.5 text-xs font-medium',
-                        tk.botBalance > 0 ? 'bg-brand-500/10 text-brand-400' : 'bg-amber-500/10 text-amber-400')}>
-                        {tk.botBalance > 0
-                          ? `Bot: ${fmtBalance(tk.botBalance, tk.symbol)}`
-                          : `Bot has no ${tk.symbol}`}
-                      </div>
+                      <span className={clsx('shrink-0 text-xs px-2 py-0.5 rounded-lg font-medium whitespace-nowrap',
+                        isPeg ? 'bg-brand-500/20 text-brand-400' : 'bg-zinc-800 text-zinc-400')}>
+                        {roleLabel}
+                      </span>
                     </div>
-                  );
-                })}
-              </div>
 
-              {/* Swap roles + refresh */}
-              <div className="flex gap-2">
-                <button type="button" onClick={swapRoles}
-                  className="flex-1 btn-ghost text-xs py-2 flex items-center justify-center gap-1.5">
-                  <ArrowLeftRight className="h-3.5 w-3.5" />
-                  Swap Roles
-                </button>
-                <button type="button"
-                  onClick={() => void runResolve(s.pairAddress, s.chain as 'bsc' | 'ethereum')}
-                  disabled={resolving}
-                  className="btn-ghost text-xs py-2 px-3 flex items-center gap-1.5 disabled:opacity-40">
-                  <RefreshCw className={clsx('h-3.5 w-3.5', resolving && 'animate-spin')} />
-                  Refresh
-                </button>
-              </div>
+                    <div className="flex items-center gap-1 bg-zinc-800/60 rounded-xl px-2 py-1.5">
+                      <span className="text-xs font-mono text-zinc-500 flex-1 min-w-0 truncate">
+                        {tk.address.slice(0, 6)}…{tk.address.slice(-4)}
+                      </span>
+                      <CopyBtn text={tk.address} />
+                    </div>
 
-              {/* Bot wallet address hint */}
-              {pool.botAddress && (
-                <div className="flex items-center gap-1.5 px-1">
-                  <p className="text-xs text-zinc-600">Bot wallet:</p>
-                  <span className="text-xs font-mono text-zinc-500">{pool.botAddress.slice(0, 8)}…{pool.botAddress.slice(-6)}</span>
-                  <CopyBtn text={pool.botAddress} />
-                </div>
-              )}
+                    <p className="text-xs text-zinc-600">{tk.decimals} decimals</p>
+
+                    <div className={clsx('rounded-xl px-2.5 py-1.5 text-xs font-medium',
+                      tk.botBalance > 0 ? 'bg-brand-500/10 text-brand-400' : 'bg-amber-500/10 text-amber-400')}>
+                      {tk.botBalance > 0
+                        ? `Bot: ${fmtBalance(tk.botBalance, tk.symbol)}`
+                        : `Bot has no ${tk.symbol}`}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          )}
-        </div>
-      ) : (
-        /* ── Solana: manual mint inputs ── */
-        <div className="space-y-3">
-          <TokenBox
-            label="Token to Peg (mint)"
-            value={s.tokenAddress}
-            placeholder="Token mint address…"
-            onChange={str('tokenAddress')}
-            chain={s.chain}
-          />
-          <TokenBox
-            label="Stable Mint"
-            value={s.stableAddress}
-            placeholder="Stable mint (USDC, USDT…)"
-            onChange={str('stableAddress')}
-            chain={s.chain}
-            showBalance={false}
-          />
-        </div>
-      )}
+
+            {/* Swap roles + refresh */}
+            <div className="flex gap-2">
+              <button type="button" onClick={swapRoles}
+                className="flex-1 btn-ghost text-xs py-2 flex items-center justify-center gap-1.5">
+                <ArrowLeftRight className="h-3.5 w-3.5" />
+                Swap Roles
+              </button>
+              <button type="button"
+                onClick={() => void runResolve(s.pairAddress, s.chain)}
+                disabled={resolving}
+                className="btn-ghost text-xs py-2 px-3 flex items-center gap-1.5 disabled:opacity-40">
+                <RefreshCw className={clsx('h-3.5 w-3.5', resolving && 'animate-spin')} />
+                Refresh
+              </button>
+            </div>
+
+            {pool.botAddress && (
+              <div className="flex items-center gap-1.5 px-1">
+                <p className="text-xs text-zinc-600">Bot wallet:</p>
+                <span className="text-xs font-mono text-zinc-500">{pool.botAddress.slice(0, 8)}…{pool.botAddress.slice(-6)}</span>
+                <CopyBtn text={pool.botAddress} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Target price + band */}
       <div className="grid grid-cols-2 gap-3">

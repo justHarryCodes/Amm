@@ -572,7 +572,8 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
   const WSOL = CHAIN_TOKENS.solana.wNative.address;
 
   async function handleFundSol() {
-    if (!publicKey || !botAddress) return;
+    if (!publicKey) return;
+    if (!botAddress) return toast.error('Solana bot wallet not configured');
     const amt = parseFloat(fundAmount);
     if (isNaN(amt) || amt <= 0) return toast.error('Enter a valid amount');
 
@@ -597,7 +598,8 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
   }
 
   async function handleFundSpl() {
-    if (!publicKey || !botAddress) return;
+    if (!publicKey) return;
+    if (!botAddress) return toast.error('Solana bot wallet not configured');
     const amt = parseFloat(fundAmount);
     if (isNaN(amt) || amt <= 0) return toast.error('Enter a valid amount');
 
@@ -740,13 +742,19 @@ function SolanaSection({ botInfo }: { botInfo: BotBalances | null }) {
           {fundAsset === 'spl' && (
             <div className="space-y-2">
               <div className="flex gap-1.5 flex-wrap">
-                {[['USDC', USDC], ['USDT', USDT], ['wSOL', WSOL]].map(([l, m]) => (
+                {([['USDC', USDC], ['USDT', USDT], ['wSOL', WSOL]] as [string, string][]).map(([l, m]) => (
                   <button key={l} onClick={() => setFundMint(m)}
-                    className="px-2 py-1 rounded-lg text-xs bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors">{l}</button>
+                    className={clsx('px-2 py-1 rounded-lg text-xs transition-colors',
+                      fundMint === m
+                        ? 'bg-brand-500/10 text-brand-400 border border-brand-500/30'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-zinc-100')}>{l}</button>
                 ))}
                 {botInfo?.solana?.tokenMint && (
                   <button onClick={() => setFundMint(botInfo.solana!.tokenMint)}
-                    className="px-2 py-1 rounded-lg text-xs bg-brand-500/10 text-brand-400 hover:text-brand-300 transition-colors">
+                    className={clsx('px-2 py-1 rounded-lg text-xs transition-colors',
+                      fundMint === botInfo.solana!.tokenMint
+                        ? 'bg-brand-500/10 text-brand-400 border border-brand-500/30'
+                        : 'bg-brand-500/10 text-brand-400 hover:text-brand-300')}>
                     Peg Token
                   </button>
                 )}

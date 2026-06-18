@@ -9,6 +9,7 @@ import { getSolanaConnection, getSolanaKeypair } from '../solana/connection';
 import { getMintDecimals } from '../solana/splTransfer';
 import { executeJupiterSwap } from '../solana/jupiterPeg';
 import { PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 
 import PANCAKE_V3_ROUTER_ABI from '../abi/PancakeV3Router.json';
 import UNISWAP_V3_ROUTER_ABI from '../abi/UniswapV3Router.json';
@@ -297,6 +298,9 @@ class PegMaintainer extends EventEmitter {
       if (!pairAddress)
         throw new Error(`Pair address not set for ${chain}. Use "Find Existing Pair" or enter your pool address.`);
     }
+    if (chain === 'solana' && !pairAddress) {
+      logger.warn('Solana pool address not set — price monitoring uses Jupiter quotes only, reserves will be 0');
+    }
   }
 
   // ── Volume generation loop ─────────────────────────────────────────────────
@@ -320,10 +324,67 @@ class PegMaintainer extends EventEmitter {
 
   private async _executeVolumeSwap(snap: PriceSnapshot): Promise<void> {
     const { chain, slippageTolerance, volumeSwapSizeUsd, tokenAddress, stableAddress } = this.settings;
-    if (chain === 'solana') return;
+    const action = this._volumeDirection;
 
+    // ── Solana volume swap ─────────────────────────────────────────────────────
+    if (chain === 'solana') {
+      const connection = getSolanaConnection();
+      const keypair    = getSolanaKeypair();
+
+      if (action === 'BUY') {
+        try {
+          const ata = getAssociatedTokenAddressSync(new PublicKey(stableAddress), keypair.publicKey);
+          const bal = await connection.getTokenAccountBalance(ata, 'confirmed');
+          const have = bal.value.uiAmount ?? 0;
+          if (have < volumeSwapSizeUsd * 0.99) {
+            logger.warn('Volume BUY skipped — insufficient stable', { have: have.toFixed(4), need: volumeSwapSizeUsd });
+            return;
+          }
+        } catch { return; }
+      } else {
+        const tokenNeeded = snap.price > 0 ? volumeSwapSizeUsd / snap.price : 0;
+        if (tokenNeeded <= 0) { this._volumeDirection = 'BUY'; return; }
+        try {
+          const ata = getAssociatedTokenAddressSync(new PublicKey(tokenAddress), keypair.publicKey);
+          const bal = await connection.getTokenAccountBalance(ata, 'confirmed');
+          const have = bal.value.uiAmount ?? 0;
+          if (have < tokenNeeded * 0.99) {
+            logger.warn('Volume SELL skipped — insufficient token, resetting to BUY', { have: have.toFixed(6), need: tokenNeeded.toFixed(6) });
+            this._volumeDirection = 'BUY';
+            return;
+          }
+        } catch { this._volumeDirection = 'BUY'; return; }
+      }
+
+      const amount = action === 'BUY'
+        ? volumeSwapSizeUsd
+        : snap.price > 0 ? volumeSwapSizeUsd / snap.price : 0;
+      if (amount <= 0) return;
+
+      const rec: TradeRecord = {
+        timestamp: new Date(), action, chain: 'solana',
+        tokenAmount: 0, stableAmount: 0,
+        priceBefore: snap.price, priceAfter: null,
+        txHash: null, status: 'PENDING', isVolumeTrade: true,
+      };
+
+      try {
+        await this._executeSolanaTrade(action, amount, snap, slippageTolerance, rec);
+        this._volumeDirection = action === 'BUY' ? 'SELL' : 'BUY';
+        logger.info('Solana volume swap done', { action, amount, txHash: rec.txHash });
+      } catch (e: unknown) {
+        rec.status = 'FAILED';
+        rec.error  = (e as Error).message;
+        logger.warn('Solana volume swap failed — retrying same direction next tick', { action, error: rec.error });
+      }
+
+      await this._saveRecord(rec);
+      this.emit('trade', rec);
+      return;
+    }
+
+    // ── EVM volume swap ────────────────────────────────────────────────────────
     const evmChain = chain as 'bsc' | 'ethereum';
-    const action   = this._volumeDirection;
 
     // Pre-flight balance check — abort if the bot can't cover this swap
     const signer   = getChainSigner(evmChain);
@@ -340,9 +401,9 @@ class PegMaintainer extends EventEmitter {
         const have = parseFloat(ethers.formatUnits(bal, Number(dec)));
         if (have < volumeSwapSizeUsd * 0.99) {
           logger.warn('Volume BUY skipped — insufficient stable', { have: have.toFixed(4), need: volumeSwapSizeUsd });
-          return; // Keep direction as BUY — retry next tick once wallet is funded
+          return;
         }
-      } catch { /* non-fatal — let the trade attempt and fail with its own error */ }
+      } catch { /* non-fatal */ }
     } else {
       const tokenNeeded = snap.price > 0 ? volumeSwapSizeUsd / snap.price : 0;
       if (tokenNeeded <= 0) { this._volumeDirection = 'BUY'; return; }
@@ -354,14 +415,13 @@ class PegMaintainer extends EventEmitter {
           logger.warn('Volume SELL skipped — insufficient token, resetting to BUY', {
             have: have.toFixed(6), need: tokenNeeded.toFixed(6),
           });
-          this._volumeDirection = 'BUY'; // Reset so next tick buys tokens first
+          this._volumeDirection = 'BUY';
           return;
         }
       } catch { /* non-fatal */ }
     }
 
-    // Cap swap to 5 % of single-sided pool depth so we never exhaust the active
-    // tick range in a concentrated-liquidity (V3) pool.
+    // Cap swap to 5% of single-sided pool depth so we never exhaust the active tick range
     const maxUsd = snap.liquidityUsd > 0 ? snap.liquidityUsd * 0.05 : volumeSwapSizeUsd;
     const cappedUsd = Math.min(volumeSwapSizeUsd, maxUsd);
     if (cappedUsd < volumeSwapSizeUsd) {
@@ -385,14 +445,12 @@ class PegMaintainer extends EventEmitter {
 
     try {
       await this._executeEvmTrade(evmChain, action, amount, snap, slippageTolerance, rec);
-      // Only flip direction after a confirmed successful swap
       this._volumeDirection = action === 'BUY' ? 'SELL' : 'BUY';
       logger.info('Volume swap done', { action, amount, txHash: rec.txHash });
     } catch (e: unknown) {
       rec.status = 'FAILED';
       rec.error  = (e as Error).message;
       logger.warn('Volume swap failed — retrying same direction next tick', { action, error: rec.error });
-      // Direction unchanged — retry same side next tick
     }
 
     await this._saveRecord(rec);

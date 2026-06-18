@@ -12,14 +12,15 @@ declare global {
 
 function buildSolanaUrl(): string {
   const key = config.alchemy.apiKey;
-  if (!key) throw new Error('ALCHEMY_API_KEY is not configured — all RPC calls go through Alchemy');
-
-  const solNet    = getSettings().solanaNetwork;
-  const isMainnet = solNet === 'mainnet-beta';
-
-  return isMainnet
-    ? `https://solana-mainnet.g.alchemy.com/v2/${key}`
-    : `https://solana-devnet.g.alchemy.com/v2/${key}`;
+  if (key) {
+    const solNet    = getSettings().solanaNetwork;
+    const isMainnet = solNet === 'mainnet-beta';
+    return isMainnet
+      ? `https://solana-mainnet.g.alchemy.com/v2/${key}`
+      : `https://solana-devnet.g.alchemy.com/v2/${key}`;
+  }
+  if (config.solana.rpcUrl) return config.solana.rpcUrl;
+  return 'https://api.mainnet-beta.solana.com';
 }
 
 export function getSolanaConnection(): Connection {

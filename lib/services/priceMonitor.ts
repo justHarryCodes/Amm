@@ -328,12 +328,43 @@ class PriceMonitor extends EventEmitter {
 
   private async _getSolanaPrice(): Promise<PriceSnapshot> {
     const cfg = this.activeConfig!;
+
+    // When a pool address is configured, fetch reserves + price from Raydium API
+    if (cfg.pairAddress) {
+      try {
+        const { resolveSolanaPool } = await import('../solana/raydiumPool');
+        const pool = await resolveSolanaPool(cfg.pairAddress);
+        const mintAIsToken = pool.mintA.address === cfg.tokenAddress;
+        const tokenR  = mintAIsToken ? pool.mintAmountA : pool.mintAmountB;
+        const stableR = mintAIsToken ? pool.mintAmountB : pool.mintAmountA;
+        const price   = tokenR > 0 ? stableR / tokenR : 0;
+        const snap: PriceSnapshot = {
+          timestamp: new Date(), price,
+          tokenReserve: tokenR, stableReserve: stableR, liquidityUsd: pool.liquidityUsd,
+          chain: 'solana',
+          dexVersion: pool.type === 'Concentrated' ? 'v3' : 'v2',
+          tokenSymbol:  mintAIsToken ? pool.mintA.symbol : pool.mintB.symbol,
+          stableSymbol: mintAIsToken ? pool.mintB.symbol : pool.mintA.symbol,
+          blockNumber: 0,
+          marketPriceUsd: null, cgChange24h: null, cgVolume24h: null, cgMarketCap: null,
+        };
+        this.tokenSymbol  = snap.tokenSymbol;
+        this.stableSymbol = snap.stableSymbol;
+        this.lastSnapshot = snap;
+        this.emit('price', snap);
+        return snap;
+      } catch (e: unknown) {
+        logger.warn('Solana pool price fetch failed, falling back to Jupiter quote', { error: (e as Error).message });
+      }
+    }
+
+    // Fallback: Jupiter quote (price only, no reserves)
     const result = await fetchSolanaPrice(cfg.tokenAddress, cfg.stableAddress);
     const snap: PriceSnapshot = {
       timestamp: result.timestamp, price: result.price,
       tokenReserve: 0, stableReserve: 0, liquidityUsd: 0,
       chain: 'solana', dexVersion: 'unknown',
-      tokenSymbol: '', stableSymbol: '', blockNumber: 0,
+      tokenSymbol: this.tokenSymbol, stableSymbol: this.stableSymbol, blockNumber: 0,
       marketPriceUsd: null, cgChange24h: null, cgVolume24h: null, cgMarketCap: null,
     };
     this.lastSnapshot = snap;

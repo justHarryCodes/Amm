@@ -11,6 +11,7 @@ import {
   TxVersion,
 } from '@raydium-io/raydium-sdk-v2';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import BN from 'bn.js';
 import { getSolanaConnection, getSolanaKeypair } from './connection';
 import { config } from '../config';
@@ -123,6 +124,87 @@ export async function initializeSolanaPool(
 
   logger.info('Raydium CPMM pool created', { poolId, txId });
   return { isNewPool: true, poolId, txHash: txId };
+}
+
+// ── Pool resolution ────────────────────────────────────────────────────────────
+
+interface RaydiumApiMint {
+  address: string;
+  symbol:  string;
+  name:    string;
+  decimals: number;
+}
+
+interface RaydiumApiPool {
+  type:         string;
+  id:           string;
+  mintA:        RaydiumApiMint;
+  mintB:        RaydiumApiMint;
+  price:        number;
+  mintAmountA:  number;
+  mintAmountB:  number;
+  tvl:          number;
+}
+
+export interface SolanaResolvedPool {
+  poolId:       string;
+  type:         string;
+  mintA:        RaydiumApiMint & { botBalance: number };
+  mintB:        RaydiumApiMint & { botBalance: number };
+  price:        number;
+  mintAmountA:  number;
+  mintAmountB:  number;
+  liquidityUsd: number;
+  botAddress:   string;
+}
+
+async function getSplBotBalance(connection: Connection, mint: string, owner: PublicKey): Promise<number> {
+  try {
+    const ata = getAssociatedTokenAddressSync(new PublicKey(mint), owner);
+    const bal = await connection.getTokenAccountBalance(ata, 'confirmed');
+    return bal.value.uiAmount ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Resolve a Raydium pool by ID: returns token mints, symbols, vault amounts, and bot balances.
+ * Uses the Raydium API v3 endpoint.
+ */
+export async function resolveSolanaPool(poolId: string): Promise<SolanaResolvedPool> {
+  const res = await fetch(
+    `https://api-v3.raydium.io/pools/info/ids?ids=${encodeURIComponent(poolId)}`,
+    { signal: AbortSignal.timeout(10_000) }
+  );
+  if (!res.ok) throw new Error(`Raydium API error (${res.status})`);
+
+  const json = await res.json() as { success: boolean; data?: { data?: RaydiumApiPool[] } };
+  if (!json.success || !json.data?.data?.length) {
+    throw new Error('Pool not found in Raydium — verify the pool address');
+  }
+  const pool = json.data.data[0];
+
+  const connection  = getSolanaConnection();
+  const keypair     = getSolanaKeypair();
+  const botPublicKey = keypair.publicKey;
+
+  const [botBalA, botBalB] = await Promise.all([
+    getSplBotBalance(connection, pool.mintA.address, botPublicKey),
+    getSplBotBalance(connection, pool.mintB.address, botPublicKey),
+  ]);
+
+  return {
+    poolId:       pool.id,
+    type:         pool.type,
+    mintA:        { ...pool.mintA, botBalance: botBalA },
+    mintB:        { ...pool.mintB, botBalance: botBalB },
+    price:        pool.price,
+    mintAmountA:  pool.mintAmountA,
+    mintAmountB:  pool.mintAmountB,
+    liquidityUsd: pool.tvl,
+    botAddress:   botPublicKey.toBase58(),
+  };
 }
 
 /**

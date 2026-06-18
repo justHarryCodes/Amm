@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { ethers } from 'ethers';
 import { pegMaintainer } from '@/lib/services/pegMaintainer';
 import { getChainProvider, getChainSigner } from '@/lib/blockchain/provider';
+import { resolveSolanaPool } from '@/lib/solana/raydiumPool';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,7 @@ const ERC20_META = [
 ];
 
 // Known stable addresses (lowercase) — used to auto-suggest which token is the peg vs stable
-const KNOWN_STABLES = new Set([
+const KNOWN_STABLES_EVM = new Set([
   '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', // USDC BSC
   '0x55d398326f99059ff775485246999027b3197955', // USDT BSC
   '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c', // WBNB BSC
@@ -24,26 +25,55 @@ const KNOWN_STABLES = new Set([
   '0xbdfa0f1b0c42b2c43b31a2c5f1584b1759d48888', // Custom stable
 ]);
 
-// GET /api/peg/resolve-pair?pairAddress=0x...&chain=bsc
+const KNOWN_STABLES_SOL = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  // USDT
+  'So11111111111111111111111111111111111111112',     // wSOL
+]);
+
+// GET /api/peg/resolve-pair?pairAddress=...&chain=bsc|ethereum|solana
 // Returns full token info for both tokens in the pool — no manual token input needed.
 export async function GET(req: NextRequest) {
   const pairAddress = req.nextUrl.searchParams.get('pairAddress') ?? '';
-  const chain       = (req.nextUrl.searchParams.get('chain') ?? 'bsc') as 'bsc' | 'ethereum';
+  const chain       = req.nextUrl.searchParams.get('chain') ?? 'bsc';
 
+  // ── Solana ──────────────────────────────────────────────────────────────────
+  if (chain === 'solana') {
+    if (!pairAddress || pairAddress.length < 32 || pairAddress.length > 44) {
+      return NextResponse.json({ error: 'Invalid Solana pool address' }, { status: 400 });
+    }
+    try {
+      const pool = await resolveSolanaPool(pairAddress);
+      const mintAStable = KNOWN_STABLES_SOL.has(pool.mintA.address);
+      const suggestedPeg = mintAStable ? 'token1' : 'token0';
+
+      return NextResponse.json({
+        token0:       { ...pool.mintA, botBalance: pool.mintA.botBalance },
+        token1:       { ...pool.mintB, botBalance: pool.mintB.botBalance },
+        fee:          0,
+        dexVersion:   pool.type === 'Concentrated' ? 'clmm' : 'cpmm',
+        suggestedPeg,
+        botAddress:   pool.botAddress,
+      });
+    } catch (e: unknown) {
+      return NextResponse.json({ error: (e as Error).message }, { status: 500 });
+    }
+  }
+
+  // ── EVM ──────────────────────────────────────────────────────────────────────
+  const evmChain = chain as 'bsc' | 'ethereum';
   if (!ethers.isAddress(pairAddress)) {
     return NextResponse.json({ error: 'Invalid pair address' }, { status: 400 });
   }
-  if (chain !== 'bsc' && chain !== 'ethereum') {
-    return NextResponse.json({ error: 'Chain must be bsc or ethereum' }, { status: 400 });
+  if (evmChain !== 'bsc' && evmChain !== 'ethereum') {
+    return NextResponse.json({ error: 'Chain must be bsc, ethereum, or solana' }, { status: 400 });
   }
 
   try {
-    // 1. Read token0, token1, fee, dexVersion from the pool contract
-    const { token0, token1, fee, dexVersion } = await pegMaintainer.resolveFromPair(pairAddress, chain);
+    const { token0, token1, fee, dexVersion } = await pegMaintainer.resolveFromPair(pairAddress, evmChain);
 
-    // 2. Fetch ERC20 metadata + bot balance for both tokens in parallel
-    const provider   = getChainProvider(chain);
-    const signer     = getChainSigner(chain);
+    const provider   = getChainProvider(evmChain);
+    const signer     = getChainSigner(evmChain);
     const botAddress = signer.address;
 
     async function tokenInfo(address: string) {
@@ -54,31 +84,20 @@ export async function GET(req: NextRequest) {
         c.decimals(),
         c.balanceOf(botAddress),
       ]);
-      const symbol   = symR.status  === 'fulfilled' ? String(symR.value)                               : 'UNKNOWN';
-      const name     = nameR.status === 'fulfilled' ? String(nameR.value)                              : symbol;
-      const decimals = decR.status  === 'fulfilled' ? Number(decR.value)                               : 18;
-      const botBalance = balR.status === 'fulfilled'
+      const symbol     = symR.status  === 'fulfilled' ? String(symR.value)  : 'UNKNOWN';
+      const name       = nameR.status === 'fulfilled' ? String(nameR.value) : symbol;
+      const decimals   = decR.status  === 'fulfilled' ? Number(decR.value)  : 18;
+      const botBalance = balR.status  === 'fulfilled'
         ? parseFloat(ethers.formatUnits(balR.value as bigint, decimals))
         : 0;
       return { address, symbol, name, decimals, botBalance };
     }
 
     const [t0, t1] = await Promise.all([tokenInfo(token0), tokenInfo(token1)]);
+    const t0stable     = KNOWN_STABLES_EVM.has(token0.toLowerCase());
+    const suggestedPeg = t0stable ? 'token1' : 'token0';
 
-    // 3. Suggest roles: stable addresses → stable, other → peg
-    const t0stable = KNOWN_STABLES.has(token0.toLowerCase());
-    const suggestedPeg    = t0stable ? 'token1' : 'token0';
-    const suggestedStable = t0stable ? 'token0' : 'token1';
-
-    return NextResponse.json({
-      token0: t0,
-      token1: t1,
-      fee,
-      dexVersion,
-      suggestedPeg,
-      suggestedStable,
-      botAddress,
-    });
+    return NextResponse.json({ token0: t0, token1: t1, fee, dexVersion, suggestedPeg, botAddress });
   } catch (e: unknown) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
