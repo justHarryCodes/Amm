@@ -1,13 +1,15 @@
-import { NextResponse } from 'next/server';
-import { pegMaintainer } from '@/lib/services/pegMaintainer';
+import { NextRequest, NextResponse } from 'next/server';
+import { getPegSlot } from '@/lib/services/pegMaintainer';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const slot = Math.min(2, Math.max(0, Number(req.nextUrl.searchParams.get('slot') ?? 0)));
+  const peg = getPegSlot(slot);
   try {
-    const pair = await pegMaintainer.findPair();
+    const pair = await peg.findPair();
     if (pair) {
-      pegMaintainer.updateSettings({ pairAddress: pair });
+      peg.updateSettings({ pairAddress: pair });
       return NextResponse.json({ found: true, pairAddress: pair });
     }
     return NextResponse.json({ found: false, pairAddress: null });

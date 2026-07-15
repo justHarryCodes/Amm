@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
-import { priceMonitor, PriceSnapshot } from './priceMonitor';
+import { getPriceMonitorSlot, PriceMonitor, PriceSnapshot } from './priceMonitor';
 import { getChainSigner, getChainProvider, getGasPrice } from '../blockchain/provider';
 import { config, PegChain } from '../config';
 import { logger } from '../utils/logger';
@@ -104,9 +104,17 @@ function initialSettings(): PegSettings {
   };
 }
 
+// One-time migration to add slot column to peg_trades
+let _slotColumnEnsured = false;
+async function ensureSlotColumn(): Promise<void> {
+  if (_slotColumnEnsured) return;
+  await query('ALTER TABLE peg_trades ADD COLUMN IF NOT EXISTS slot SMALLINT NOT NULL DEFAULT 0').catch(() => {});
+  _slotColumnEnsured = true;
+}
+
 class PegMaintainer extends EventEmitter {
   state: BotState = 'STOPPED';
-  settings: PegSettings = initialSettings();
+  settings: PegSettings;
 
   lastTradeAt: Date | null = null;
   dailySpendUsd = 0;
@@ -115,6 +123,14 @@ class PegMaintainer extends EventEmitter {
   private _volumeTimer: ReturnType<typeof setInterval> | null = null;
   private _volumeDirection: 'BUY' | 'SELL' = 'BUY';
 
+  constructor(
+    private readonly slot: number,
+    private readonly monitor: PriceMonitor,
+  ) {
+    super();
+    this.settings = initialSettings();
+  }
+
   updateSettings(partial: Partial<PegSettings>): void {
     if (partial.chain && partial.chain !== this.settings.chain) {
       if (this.state !== 'STOPPED') throw new Error('Stop the bot before changing chain');
@@ -122,18 +138,15 @@ class PegMaintainer extends EventEmitter {
     } else {
       this.settings = { ...this.settings, ...partial };
     }
-    logger.info('Peg settings updated', { chain: this.settings.chain, token: this.settings.tokenAddress.slice(0, 10) });
+    logger.info('Peg settings updated', { slot: this.slot, chain: this.settings.chain, token: this.settings.tokenAddress.slice(0, 10) });
 
     // Live-toggle volume loop when bot is already running
     if (this.state === 'AUTO_TRADE') {
       if (this.settings.volumeEnabled && !this._volumeTimer) {
-        // Settings just enabled volume — restart loop with new interval
         this._startVolumeLoop();
       } else if (!this.settings.volumeEnabled && this._volumeTimer) {
-        // Settings just disabled volume
         this._stopVolumeLoop();
       } else if (this.settings.volumeEnabled && this._volumeTimer && partial.volumeIntervalSeconds) {
-        // Interval changed while running — restart with new interval
         this._stopVolumeLoop();
         this._startVolumeLoop();
       }
@@ -146,24 +159,19 @@ class PegMaintainer extends EventEmitter {
   async start(mode: 'MONITOR_ONLY' | 'AUTO_TRADE'): Promise<void> {
     if (this.state !== 'STOPPED') return;
     this._validateSettings();
-    try { await priceMonitor.initialize(this.settings); }
+    try { await this.monitor.initialize(this.settings); }
     catch (e: unknown) { throw new Error(`PriceMonitor init failed: ${(e as Error).message}`); }
 
-    // For V3 pools: verify the pool is registered in the official factory so the
-    // SmartRouter can find it. The SmartRouter derives the pool address from
-    // (factory, tokenA, tokenB, fee) — if the pool wasn't deployed through the
-    // official factory, that lookup fails and every swap reverts.
+    // For V3 pools: verify the pool is registered in the official factory
     const { chain, pairAddress, tokenAddress, stableAddress } = this.settings;
-    if ((chain === 'bsc' || chain === 'ethereum') && pairAddress && priceMonitor.getPoolVersion() === 'v3') {
+    if ((chain === 'bsc' || chain === 'ethereum') && pairAddress && this.monitor.getPoolVersion() === 'v3') {
       try {
         const provider  = getChainProvider(chain);
         const factory   = new ethers.Contract(CHAIN_TOKENS[chain].factory, V3_FACTORY_ABI, provider);
 
-        // 1. Read fee from the pool contract itself
         const pool    = new ethers.Contract(pairAddress, V3_POOL_ABI, provider);
         const poolFee = Number(await pool.fee());
 
-        // 2. Confirm the factory agrees — i.e. the SmartRouter will find this pool
         const factoryPool = poolFee
           ? String(await factory.getPool(tokenAddress, stableAddress, poolFee))
           : ethers.ZeroAddress;
@@ -173,7 +181,6 @@ class PegMaintainer extends EventEmitter {
           logger.info('V3 pool verified via factory', { fee: poolFee, pool: pairAddress });
           this.settings.poolFeeTier = poolFee;
         } else {
-          // Factory doesn't recognise the pool at that fee — scan all tiers
           logger.warn('Pool not in factory at fee, scanning tiers', { poolFee, factoryPool, pairAddress });
           let found = false;
           for (const tier of V3_FEE_TIERS) {
@@ -194,8 +201,7 @@ class PegMaintainer extends EventEmitter {
       }
     }
 
-    // Check token swap gate — some custom tokens require openSwapGate() to be
-    // called by the owner before any router swap can go through.
+    // Check token swap gate
     if (chain === 'bsc' || chain === 'ethereum') {
       try {
         const provider = getChainProvider(chain);
@@ -220,20 +226,20 @@ class PegMaintainer extends EventEmitter {
     }
 
     this.state = mode;
-    priceMonitor.on('price', this._onPrice);
-    priceMonitor.start(this.settings.chain, 15_000);
+    this.monitor.on('price', this._onPrice);
+    this.monitor.start(this.settings.chain, 15_000);
     if (mode === 'AUTO_TRADE') this._startVolumeLoop();
-    logger.info('PegMaintainer started', { mode, chain: this.settings.chain, poolFeeTier: this.settings.poolFeeTier });
+    logger.info('PegMaintainer started', { slot: this.slot, mode, chain: this.settings.chain, poolFeeTier: this.settings.poolFeeTier });
     this.emit('stateChange', this.state);
     void this.saveState();
   }
 
   stop(): void {
     this.state = 'STOPPED';
-    priceMonitor.removeListener('price', this._onPrice);
-    priceMonitor.stop();
+    this.monitor.removeListener('price', this._onPrice);
+    this.monitor.stop();
     this._stopVolumeLoop();
-    logger.info('PegMaintainer stopped');
+    logger.info('PegMaintainer stopped', { slot: this.slot });
     this.emit('stateChange', this.state);
     void this.saveState();
   }
@@ -242,7 +248,7 @@ class PegMaintainer extends EventEmitter {
     if (this.state === 'STOPPED') return;
     this.state = 'PAUSED';
     this._stopVolumeLoop();
-    logger.warn('PegMaintainer PAUSED');
+    logger.warn('PegMaintainer PAUSED', { slot: this.slot });
     this.emit('stateChange', this.state);
     void this.saveState();
   }
@@ -251,7 +257,7 @@ class PegMaintainer extends EventEmitter {
     if (this.state !== 'PAUSED') return;
     this.state = 'AUTO_TRADE';
     this._startVolumeLoop();
-    logger.info('PegMaintainer resumed');
+    logger.info('PegMaintainer resumed', { slot: this.slot });
     this.emit('stateChange', this.state);
     void this.saveState();
   }
@@ -260,10 +266,10 @@ class PegMaintainer extends EventEmitter {
     try {
       await query(
         `INSERT INTO bot_state (id, mode, settings, updated_at)
-         VALUES (1, $1, $2, NOW())
+         VALUES ($1, $2, $3, NOW())
          ON CONFLICT (id) DO UPDATE
            SET mode = EXCLUDED.mode, settings = EXCLUDED.settings, updated_at = EXCLUDED.updated_at`,
-        [this.state, JSON.stringify(this.settings)]
+        [this.slot + 1, this.state, JSON.stringify(this.settings)]
       );
     } catch { /* non-fatal */ }
   }
@@ -271,7 +277,7 @@ class PegMaintainer extends EventEmitter {
   async restoreState(): Promise<void> {
     try {
       const rows = await query<{ mode: string; settings: unknown }>(
-        'SELECT mode, settings FROM bot_state WHERE id = 1'
+        'SELECT mode, settings FROM bot_state WHERE id = $1', [this.slot + 1]
       );
       if (!rows.length) return;
       const { mode, settings: saved } = rows[0];
@@ -279,14 +285,14 @@ class PegMaintainer extends EventEmitter {
         this.settings = { ...this.settings, ...(saved as Partial<PegSettings>) };
       }
       if (mode !== 'MONITOR_ONLY' && mode !== 'AUTO_TRADE') return;
-      logger.info('[PegMaintainer] Restoring persisted bot state', { mode });
+      logger.info('[PegMaintainer] Restoring persisted bot state', { slot: this.slot, mode });
       try {
         await this.start(mode as 'MONITOR_ONLY' | 'AUTO_TRADE');
       } catch (e: unknown) {
-        logger.error('[PegMaintainer] Auto-restart failed', { error: (e as Error).message });
+        logger.error('[PegMaintainer] Auto-restart failed', { slot: this.slot, error: (e as Error).message });
       }
     } catch (e: unknown) {
-      logger.error('[PegMaintainer] Failed to read persisted state', { error: (e as Error).message });
+      logger.error('[PegMaintainer] Failed to read persisted state', { slot: this.slot, error: (e as Error).message });
     }
   }
 
@@ -310,12 +316,12 @@ class PegMaintainer extends EventEmitter {
     const ms = this.settings.volumeIntervalSeconds * 1000;
     this._volumeTimer = setInterval(async () => {
       if (this.state !== 'AUTO_TRADE') return;
-      const snap = priceMonitor.getLastSnapshot();
+      const snap = this.monitor.getLastSnapshot();
       if (!snap) return;
       try { await this._executeVolumeSwap(snap); }
-      catch (e: unknown) { logger.warn('Volume swap failed', { error: (e as Error).message }); }
+      catch (e: unknown) { logger.warn('Volume swap failed', { slot: this.slot, error: (e as Error).message }); }
     }, ms);
-    logger.info('Volume loop started', { intervalMs: ms, sizeUsd: this.settings.volumeSwapSizeUsd });
+    logger.info('Volume loop started', { slot: this.slot, intervalMs: ms, sizeUsd: this.settings.volumeSwapSizeUsd });
   }
 
   private _stopVolumeLoop(): void {
@@ -386,7 +392,6 @@ class PegMaintainer extends EventEmitter {
     // ── EVM volume swap ────────────────────────────────────────────────────────
     const evmChain = chain as 'bsc' | 'ethereum';
 
-    // Pre-flight balance check — abort if the bot can't cover this swap
     const signer   = getChainSigner(evmChain);
     const provider = signer.provider!;
     const balAbi   = [
@@ -421,7 +426,6 @@ class PegMaintainer extends EventEmitter {
       } catch { /* non-fatal */ }
     }
 
-    // Cap swap to 5% of single-sided pool depth so we never exhaust the active tick range
     const maxUsd = snap.liquidityUsd > 0 ? snap.liquidityUsd * 0.05 : volumeSwapSizeUsd;
     const cappedUsd = Math.min(volumeSwapSizeUsd, maxUsd);
     if (cappedUsd < volumeSwapSizeUsd) {
@@ -464,7 +468,7 @@ class PegMaintainer extends EventEmitter {
     const upper = targetPeg * (1 + upperBand);
     const lower = targetPeg * (1 - lowerBand);
 
-    logger.info('Price check', { chain: snap.chain, price: snap.price.toFixed(6), state: this.state });
+    logger.info('Price check', { slot: this.slot, chain: snap.chain, price: snap.price.toFixed(6), state: this.state });
     this.emit('priceUpdate', { snapshot: snap, upper, lower });
 
     if (this.state !== 'AUTO_TRADE') return;
@@ -496,11 +500,8 @@ class PegMaintainer extends EventEmitter {
 
   private async _evalSell(snap: PriceSnapshot): Promise<void> {
     const { targetPeg, maxTradeSizeTokens, slippageTolerance } = this.settings;
-    // V3: calcSellAmount uses V2 constant-product math on total balanceOf reserves.
-    // Out-of-range V3 positions inflate tokenReserve → formula goes negative → returns 0.
-    // For V3 use maxTradeSizeTokens directly; the bot re-checks each tick until in-band.
-    const ideal  = priceMonitor.calcSellAmount(snap, targetPeg);
-    const amount = priceMonitor.getPoolVersion() === 'v3' || ideal <= 0
+    const ideal  = this.monitor.calcSellAmount(snap, targetPeg);
+    const amount = this.monitor.getPoolVersion() === 'v3' || ideal <= 0
       ? maxTradeSizeTokens
       : Math.min(ideal, maxTradeSizeTokens);
     const blocked = this._checkSafety('SELL', amount * snap.price, snap);
@@ -510,11 +511,9 @@ class PegMaintainer extends EventEmitter {
 
   private async _evalBuy(snap: PriceSnapshot): Promise<void> {
     const { targetPeg, maxTradeSizeTokens, maxDailySpendUsd, slippageTolerance } = this.settings;
-    // V3: calcBuyAmount over-inflates due to out-of-range tokens in balanceOf reserves.
-    // Cap to maxTradeSizeTokens * targetPeg (USD at peg price); bot re-checks each tick.
     const maxUsd = Math.min(maxTradeSizeTokens * targetPeg, maxDailySpendUsd - this.dailySpendUsd);
-    const ideal  = priceMonitor.calcBuyAmount(snap, targetPeg);
-    const amount = priceMonitor.getPoolVersion() === 'v3' || ideal <= 0
+    const ideal  = this.monitor.calcBuyAmount(snap, targetPeg);
+    const amount = this.monitor.getPoolVersion() === 'v3' || ideal <= 0
       ? maxUsd
       : Math.min(ideal, maxUsd);
     const blocked = this._checkSafety('BUY', amount, snap);
@@ -544,9 +543,7 @@ class PegMaintainer extends EventEmitter {
     this.emit('trade', rec);
   }
 
-  // ── EVM trade via KyberSwap DEX aggregator ───────────────────────────────
-  // Flow: pair address → token0/token1 → KyberSwap finds best route → swap.
-  // Price monitoring still reads from the PancakeSwap pool (priceMonitor).
+  // ── EVM trade via KyberSwap DEX aggregator ────────────────────────────────
 
   private async _executeEvmTrade(
     chain: 'bsc' | 'ethereum',
@@ -567,8 +564,6 @@ class PegMaintainer extends EventEmitter {
       Number(await new ethers.Contract(stableAddress, erc20Dec, provider).decimals()),
     ]);
 
-    // BUY  = spend stable, receive token
-    // SELL = spend token,  receive stable
     const sellToken  = action === 'SELL' ? tokenAddress  : stableAddress;
     const buyToken   = action === 'SELL' ? stableAddress : tokenAddress;
     const sellDec    = action === 'SELL' ? tokenDec      : stableDec;
@@ -580,9 +575,8 @@ class PegMaintainer extends EventEmitter {
       ethereum: 'https://aggregator-api.kyberswap.com/ethereum',
     };
     const base = KYBER_BASE[chain];
-    const slippageBps = Math.round(slippage * 10000); // e.g. 0.005 → 50 bps
+    const slippageBps = Math.round(slippage * 10000);
 
-    // ── Step 1: get route ───────────────────────────────────────────────────
     logger.info('KyberSwap: fetching route', { chain, action, sellToken, buyToken, sellAmount: sellAmount.toString() });
     const routeRes = await fetch(
       `${base}/api/v1/routes?tokenIn=${sellToken}&tokenOut=${buyToken}&amountIn=${sellAmount.toString()}`,
@@ -594,7 +588,6 @@ class PegMaintainer extends EventEmitter {
     const { routeSummary, routerAddress } = routeJson.data;
     logger.info('KyberSwap: route found', { chain, action, routerAddress });
 
-    // ── Step 2: build transaction ───────────────────────────────────────────
     const buildRes = await fetch(`${base}/api/v1/route/build`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'pegbot/1.0', 'Origin': 'https://kyberswap.com' },
@@ -611,11 +604,9 @@ class PegMaintainer extends EventEmitter {
     const { data: txData, amountOut, routerAddress: txRouter } = buildJson.data;
     logger.info('KyberSwap: tx built', { chain, action, amountOut, router: txRouter });
 
-    // ── Step 3: approve sell token to the KyberSwap router ─────────────────
     const spender = txRouter || routerAddress;
     await ensureApproval(sellToken, spender, sellAmount, chain);
 
-    // ── Step 4: send transaction ────────────────────────────────────────────
     const tx = await signer.sendTransaction({
       to:    spender,
       data:  txData,
@@ -635,7 +626,7 @@ class PegMaintainer extends EventEmitter {
       rec.tokenAmount  = bought;
     }
 
-    const after = await priceMonitor.getPrice(chain);
+    const after = await this.monitor.getPrice(chain);
     rec.priceAfter = after.price;
     rec.status     = 'SUCCESS';
     this.lastTradeAt = new Date();
@@ -680,7 +671,7 @@ class PegMaintainer extends EventEmitter {
       rec.tokenAmount  = Number(outputAmount) / 10 ** tokenDec;
     }
 
-    const after = await priceMonitor.getPrice('solana');
+    const after = await this.monitor.getPrice('solana');
     rec.priceAfter = after.price;
     rec.status     = 'SUCCESS';
     this.lastTradeAt = new Date();
@@ -690,13 +681,11 @@ class PegMaintainer extends EventEmitter {
 
   // ── Pool management ────────────────────────────────────────────────────────
 
-  // Given a pair/pool address, return token0, token1, and fee (for V3)
   async resolveFromPair(pairAddress: string, chain: 'bsc' | 'ethereum'): Promise<{
     token0: string; token1: string; fee: number; dexVersion: 'v2' | 'v3';
   }> {
     const provider = getChainSigner(chain).provider!;
 
-    // Probe for V3
     try {
       const pool = new ethers.Contract(pairAddress, V3_POOL_ABI, provider);
       const [token0, token1, fee] = await Promise.all([
@@ -707,7 +696,6 @@ class PegMaintainer extends EventEmitter {
       return { token0, token1, fee: Number(fee), dexVersion: 'v3' };
     } catch { /* not V3 */ }
 
-    // Fall back to V2
     const pair = new ethers.Contract(pairAddress, V2_PAIR_ABI, provider);
     const [token0, token1] = await Promise.all([
       pair.token0() as Promise<string>,
@@ -716,7 +704,6 @@ class PegMaintainer extends EventEmitter {
     return { token0, token1, fee: 0, dexVersion: 'v2' };
   }
 
-  // Find existing V3 pool across all common fee tiers (or V2 pair as fallback)
   async findPair(): Promise<string | null> {
     const { chain, tokenAddress, stableAddress } = this.settings;
 
@@ -730,12 +717,10 @@ class PegMaintainer extends EventEmitter {
     const provider  = getChainSigner(chain).provider!;
     const factory   = new ethers.Contract(CHAIN_TOKENS[chain].factory, V3_FACTORY_ABI, provider);
 
-    // Try V3 fee tiers in order of most common
     for (const fee of V3_FEE_TIERS) {
       try {
         const pool: string = await factory.getPool(tokenAddress, stableAddress, fee);
         if (pool && pool !== ethers.ZeroAddress) {
-          // Update settings with discovered fee tier
           this.settings.poolFeeTier = fee;
           return pool;
         }
@@ -748,24 +733,28 @@ class PegMaintainer extends EventEmitter {
 
   private async _saveRecord(rec: TradeRecord): Promise<void> {
     try {
+      await ensureSlotColumn();
       await query(
         `INSERT INTO peg_trades
-           (timestamp,action,chain,token_amount,stable_amount,price_before,price_after,tx_hash,status,error_message,is_volume_trade)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+           (timestamp,action,chain,token_amount,stable_amount,price_before,price_after,tx_hash,status,error_message,is_volume_trade,slot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [rec.timestamp, rec.action, rec.chain, rec.tokenAmount, rec.stableAmount,
          rec.priceBefore, rec.priceAfter, rec.txHash, rec.status, rec.error ?? null,
-         rec.isVolumeTrade ?? false]
+         rec.isVolumeTrade ?? false, this.slot]
       );
     } catch { /* non-fatal */ }
   }
 
   async getTradeHistory(limit = 50, offset = 0): Promise<TradeRecord[]> {
+    await ensureSlotColumn();
     return query<TradeRecord>(
-      `SELECT * FROM peg_trades ORDER BY timestamp DESC LIMIT $1 OFFSET $2`, [limit, offset]
+      `SELECT * FROM peg_trades WHERE slot = $3 ORDER BY timestamp DESC LIMIT $1 OFFSET $2`,
+      [limit, offset, this.slot]
     );
   }
 
   async getDailyStats() {
+    await ensureSlotColumn();
     const rows = await query<{
       total_trades: string; total_buy_usd: string; total_sell_tokens: string;
       volume_trades: string; volume_usd: string;
@@ -777,7 +766,8 @@ class PegMaintainer extends EventEmitter {
          COUNT(*) FILTER (WHERE is_volume_trade)                                    AS volume_trades,
          COALESCE(SUM(CASE WHEN is_volume_trade THEN stable_amount END),0)          AS volume_usd
        FROM peg_trades
-       WHERE timestamp > NOW()-INTERVAL '24 hours' AND status='SUCCESS'`
+       WHERE timestamp > NOW()-INTERVAL '24 hours' AND status='SUCCESS' AND slot = $1`,
+      [this.slot]
     );
     const r = rows[0];
     return {
@@ -788,9 +778,22 @@ class PegMaintainer extends EventEmitter {
       volumeUsd:       parseFloat(r?.volume_usd    ?? '0'),
     };
   }
+
+  // Expose the monitor for SSE subscriptions
+  getMonitor(): PriceMonitor { return this.monitor; }
 }
 
-// ── Singleton ──────────────────────────────────────────────────────────────
-declare global { var __pegMaintainer: PegMaintainer | undefined }
-export const pegMaintainer: PegMaintainer = global.__pegMaintainer ?? new PegMaintainer();
-global.__pegMaintainer = pegMaintainer;
+// ── Multi-slot singletons ──────────────────────────────────────────────────
+declare global { var __pegSlots: (PegMaintainer | undefined)[] | undefined }
+
+export function getPegSlot(slot: number): PegMaintainer {
+  if (!global.__pegSlots) global.__pegSlots = [];
+  if (!global.__pegSlots[slot]) {
+    const monitor = getPriceMonitorSlot(slot);
+    global.__pegSlots[slot] = new PegMaintainer(slot, monitor);
+  }
+  return global.__pegSlots[slot]!;
+}
+
+// Backward-compat alias for slot 0
+export const pegMaintainer: PegMaintainer = getPegSlot(0);

@@ -55,7 +55,7 @@ function sqrtPriceX96ToHuman(
   return tokenIsToken0 ? adjusted : 1 / adjusted;
 }
 
-class PriceMonitor extends EventEmitter {
+export class PriceMonitor extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   lastSnapshot: PriceSnapshot | null = null;
 
@@ -422,7 +422,14 @@ class PriceMonitor extends EventEmitter {
   }
 }
 
-// ── Singleton ──────────────────────────────────────────────────────────────
-declare global { var __priceMonitor: PriceMonitor | undefined }
-export const priceMonitor: PriceMonitor = global.__priceMonitor ?? new PriceMonitor();
-global.__priceMonitor = priceMonitor;
+// ── Multi-slot singletons ──────────────────────────────────────────────────
+declare global { var __priceMonitorSlots: (PriceMonitor | undefined)[] | undefined }
+
+export function getPriceMonitorSlot(slot: number): PriceMonitor {
+  if (!global.__priceMonitorSlots) global.__priceMonitorSlots = [];
+  if (!global.__priceMonitorSlots[slot]) global.__priceMonitorSlots[slot] = new PriceMonitor();
+  return global.__priceMonitorSlots[slot]!;
+}
+
+// Backward-compat alias for slot 0
+export const priceMonitor: PriceMonitor = getPriceMonitorSlot(0);

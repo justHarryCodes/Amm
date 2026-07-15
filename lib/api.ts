@@ -24,24 +24,31 @@ export const updateAppSettings = (s: Record<string, string>) => api.put('/api/se
 export const getDashboard = () => api.get('/api/dashboard').then(r => r.data);
 
 // ── Peg Maintainer ─────────────────────────────────────
-export const getPegStatus      = ()          => api.get('/api/peg/status').then(r => r.data);
-export const getPegConfig      = ()          => api.get('/api/peg/config').then(r => r.data);
-export const updatePegConfig   = (cfg: Record<string, number | string>) => api.put('/api/peg/config', cfg).then(r => r.data);
-export const startBot          = (mode: string) => api.post('/api/peg/start', { mode }).then(r => r.data);
-export const stopBot           = ()          => api.post('/api/peg/stop').then(r => r.data);
-export const pauseBot          = ()          => api.post('/api/peg/pause').then(r => r.data);
-export const resumeBot         = ()          => api.post('/api/peg/resume').then(r => r.data);
-export const getTradeHistory   = (limit = 50, offset = 0) =>
-  api.get('/api/peg/trades', { params: { limit, offset } }).then(r => r.data);
-export const getPriceHistory   = (hours = 24) =>
+export const getPegStatus    = (slot = 0) => api.get('/api/peg/status',   { params: { slot } }).then(r => r.data);
+export const getPegConfig    = (slot = 0) => api.get('/api/peg/config',   { params: { slot } }).then(r => r.data);
+export const updatePegConfig = (cfg: Record<string, number | string>, slot = 0) =>
+  api.put('/api/peg/config', cfg, { params: { slot } }).then(r => r.data);
+export const startBot    = (mode: string, slot = 0) =>
+  api.post('/api/peg/start', { mode }, { params: { slot } }).then(r => r.data);
+export const stopBot     = (slot = 0) => api.post('/api/peg/stop',   null, { params: { slot } }).then(r => r.data);
+export const pauseBot    = (slot = 0) => api.post('/api/peg/pause',  null, { params: { slot } }).then(r => r.data);
+export const resumeBot   = (slot = 0) => api.post('/api/peg/resume', null, { params: { slot } }).then(r => r.data);
+export const getTradeHistory = (limit = 50, offset = 0, slot = 0) =>
+  api.get('/api/peg/trades', { params: { limit, offset, slot } }).then(r => r.data);
+export const getPriceHistory = (hours = 24) =>
   api.get('/api/peg/prices', { params: { hours } }).then(r => r.data);
-export const getBotBalance     = ()          => api.get('/api/peg/balance').then(r => r.data);
-export const findPegPair       = ()          => api.get('/api/peg/find-pair').then(r => r.data);
-export const initPool          = (tokenAmount: number, stableAmount: number) =>
+export const getBotBalance   = ()         => api.get('/api/peg/balance').then(r => r.data);
+export const findPegPair     = (slot = 0) => api.get('/api/peg/find-pair', { params: { slot } }).then(r => r.data);
+export const initPool        = (tokenAmount: number, stableAmount: number) =>
   api.post('/api/peg/init-pool', { tokenAmount, stableAmount }).then(r => r.data);
-export const getPegAllowances  = ()          => api.get('/api/peg/allowances').then(r => r.data);
-export const approveToken      = ()          => api.post('/api/peg/approve', { target: 'token'  }).then(r => r.data);
-export const approveStable     = ()          => api.post('/api/peg/approve', { target: 'stable' }).then(r => r.data);
+export const getPegAllowances = ()        => api.get('/api/peg/allowances').then(r => r.data);
+export const approveToken     = ()        => api.post('/api/peg/approve', { target: 'token'  }).then(r => r.data);
+export const approveStable    = ()        => api.post('/api/peg/approve', { target: 'stable' }).then(r => r.data);
+
+// ── Admin Wallets ───────────────────────────────────────
+export const getAdminWallets   = ()                      => api.get('/api/admin/wallets').then(r => r.data);
+export const addAdminWallet    = (address: string)       => api.post('/api/admin/wallets', { address }).then(r => r.data);
+export const removeAdminWallet = (address: string)       => api.delete(`/api/admin/wallets/${encodeURIComponent(address)}`).then(r => r.data);
 
 // ── Bulk Sender ────────────────────────────────────────
 export const getBulkConfig     = ()          => api.get('/api/bulk/config').then(r => r.data);

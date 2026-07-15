@@ -196,13 +196,41 @@ function ChainTabs({ value, onChange }: { value: PegChain; onChange: (c: PegChai
   );
 }
 
+// ── Slot tabs ─────────────────────────────────────────────────────────────────
+function SlotTabs({ value, onChange, slotStates }: {
+  value: number;
+  onChange: (s: number) => void;
+  slotStates: (string | null)[];
+}) {
+  const DOT: Record<string, string> = {
+    STOPPED: 'bg-zinc-500', MONITOR_ONLY: 'bg-amber-400', AUTO_TRADE: 'bg-brand-400', PAUSED: 'bg-red-400',
+  };
+  return (
+    <div className="flex gap-1 p-1 bg-zinc-900 rounded-xl">
+      {[0, 1, 2].map(s => (
+        <button key={s} type="button" onClick={() => onChange(s)}
+          className={clsx('flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5',
+            value === s ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300')}>
+          {slotStates[s] && slotStates[s] !== 'STOPPED' && (
+            <span className={clsx('h-1.5 w-1.5 rounded-full shrink-0', DOT[slotStates[s]!] ?? 'bg-zinc-500')} />
+          )}
+          Slot {s + 1}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function PegPage() {
+  const [slot,     setSlot]     = useState(0);
   const [status,   setStatus]   = useState<PegStatus | null>(null);
   const [settings, setSettings] = useState<PegSettings | null>(null);
   const [trades,   setTrades]   = useState<Trade[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [busy,     setBusy]     = useState(false);
+  // lightweight state for each slot (for the tab indicators)
+  const [slotStates, setSlotStates] = useState<(string | null)[]>([null, null, null]);
   const { on } = useSSE();
 
   // Cooldown countdown — ticks every second when cooldownRemaining > 0
@@ -214,25 +242,39 @@ export default function PegPage() {
     return () => clearInterval(iv);
   }, [status?.cooldownRemaining]);
 
-  const refresh = useCallback(async () => {
-    const [s, cfg, t] = await Promise.allSettled([getPegStatus(), getPegConfig(), getTradeHistory(20)]);
+  const refresh = useCallback(async (activeSlot: number) => {
+    const [s, cfg, t] = await Promise.allSettled([getPegStatus(activeSlot), getPegConfig(activeSlot), getTradeHistory(20, 0, activeSlot)]);
     if (cfg.status === 'fulfilled') setSettings(cfg.value as PegSettings);
-    if (s.status   === 'fulfilled') setStatus(s.value as PegStatus);
+    if (s.status   === 'fulfilled') {
+      const sv = s.value as PegStatus;
+      setStatus(sv);
+      setSlotStates(prev => { const n = [...prev]; n[activeSlot] = sv.state; return n; });
+    }
     if (t.status   === 'fulfilled') setTrades(t.value as Trade[]);
     setLoading(false);
   }, []);
 
-  useEffect(() => { refresh(); const iv = setInterval(refresh, 20_000); return () => clearInterval(iv); }, [refresh]);
+  // Re-fetch when slot changes
+  useEffect(() => {
+    setLoading(true);
+    setStatus(null);
+    setSettings(null);
+    setTrades([]);
+    void refresh(slot);
+    const iv = setInterval(() => refresh(slot), 20_000);
+    return () => clearInterval(iv);
+  }, [slot, refresh]);
 
   useEffect(() => {
     const o1 = on('PRICE_UPDATE', (d: unknown) => {
       const snap = d as {
-        price: number; liquidityUsd: number; timestamp: string;
+        slot: number; price: number; liquidityUsd: number; timestamp: string;
         tokenReserve: number; stableReserve: number;
         tokenSymbol: string; stableSymbol: string; blockNumber: number;
         marketPriceUsd: number | null; cgChange24h: number | null;
         cgVolume24h: number | null; cgMarketCap: number | null;
       };
+      if (snap.slot !== slot) return;
       setStatus(p => p ? {
         ...p,
         currentPrice:   snap.price,
@@ -250,24 +292,30 @@ export default function PegPage() {
       } : p);
     });
     const o2 = on('BOT_STATE', (d: unknown) => {
-      const s = d as { state: string; settings: PegSettings };
-      // Only update bot state/chain — never overwrite settings from SSE while the form may be dirty.
-      // The save flow calls setSettings() directly after updatePegConfig() resolves.
+      const s = d as { slot: number; state: string; settings: PegSettings };
+      // Always track all slot states for tab indicators
+      setSlotStates(prev => { const n = [...prev]; n[s.slot] = s.state; return n; });
+      if (s.slot !== slot) return;
       setStatus(p => p ? { ...p, state: s.state, chain: s.settings.chain } : p);
     });
-    const o3 = on('TRADE', (d: unknown) => { setTrades(p => [d as Trade, ...p].slice(0, 20)); refresh(); });
+    const o3 = on('TRADE', (d: unknown) => {
+      const t = d as { slot: number } & Trade;
+      if (t.slot !== slot) return;
+      setTrades(p => [t, ...p].slice(0, 20));
+      void refresh(slot);
+    });
     return () => { o1(); o2(); o3(); };
-  }, [on, refresh]);
+  }, [on, refresh, slot]);
 
   async function act(fn: () => Promise<unknown>, msg: string) {
     setBusy(true);
-    try { await fn(); toast.success(msg); await refresh(); }
+    try { await fn(); toast.success(msg); await refresh(slot); }
     catch (e: unknown) { toast.error((e as Error).message ?? 'Error'); }
     setBusy(false);
   }
 
   async function saveSettings(s: PegSettings): Promise<void> {
-    try { await updatePegConfig(s as unknown as Record<string, number | string>); setSettings(s); toast.success('Saved'); }
+    try { await updatePegConfig(s as unknown as Record<string, number | string>, slot); setSettings(s); toast.success('Saved'); }
     catch (e: unknown) { toast.error((e as Error).message ?? 'Failed'); }
   }
 
@@ -307,6 +355,9 @@ export default function PegPage() {
 
   return (
     <div className="page">
+
+      {/* ── SLOT SELECTOR ──────────────────────────────── */}
+      <SlotTabs value={slot} onChange={s => { setSlot(s); }} slotStates={slotStates} />
 
       {/* ── BOT STATUS ─────────────────────────────────── */}
       <div className="card space-y-4">
@@ -513,11 +564,11 @@ export default function PegPage() {
         <div className="flex gap-2 pt-1">
           {state === 'STOPPED' && (
             <>
-              <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('MONITOR_ONLY'), 'Monitoring started')}
+              <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('MONITOR_ONLY', slot), 'Monitoring started')}
                 className="btn-ghost flex-1 text-sm disabled:opacity-40">
                 <Play className="h-4 w-4 text-amber-400" /> Monitor
               </button>
-              <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('AUTO_TRADE'), 'Auto-trade started')}
+              <button disabled={busy || !readyToRun} onClick={() => act(() => startBot('AUTO_TRADE', slot), 'Auto-trade started')}
                 className="btn-primary flex-1 text-sm disabled:opacity-40">
                 <Play className="h-4 w-4" /> Auto Trade
               </button>
@@ -525,20 +576,20 @@ export default function PegPage() {
           )}
           {(state === 'MONITOR_ONLY' || state === 'AUTO_TRADE') && (
             <>
-              <button disabled={busy} onClick={() => act(stopBot, 'Bot stopped')} className="btn-ghost flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(() => stopBot(slot), 'Bot stopped')} className="btn-ghost flex-1 text-sm">
                 <Square className="h-4 w-4" /> Stop
               </button>
-              <button disabled={busy} onClick={() => act(pauseBot, 'Paused')} className="btn-danger flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(() => pauseBot(slot), 'Paused')} className="btn-danger flex-1 text-sm">
                 <Pause className="h-4 w-4" /> Pause
               </button>
             </>
           )}
           {state === 'PAUSED' && (
             <>
-              <button disabled={busy} onClick={() => act(resumeBot, 'Resumed')} className="btn-primary flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(() => resumeBot(slot), 'Resumed')} className="btn-primary flex-1 text-sm">
                 <RotateCcw className="h-4 w-4" /> Resume
               </button>
-              <button disabled={busy} onClick={() => act(stopBot, 'Stopped')} className="btn-ghost flex-1 text-sm">
+              <button disabled={busy} onClick={() => act(() => stopBot(slot), 'Stopped')} className="btn-ghost flex-1 text-sm">
                 <Square className="h-4 w-4" /> Stop
               </button>
             </>
@@ -600,7 +651,7 @@ export default function PegPage() {
 
       {/* ── PAIR SETUP ─────────────────────────────────── */}
       {settings && (
-        <PairCard settings={settings} onSave={saveSettings} />
+        <PairCard settings={settings} onSave={saveSettings} slot={slot} />
       )}
 
       {/* ── RECENT TRADES ──────────────────────────────── */}
@@ -627,7 +678,7 @@ function fmtBalance(n: number, sym: string) {
 }
 
 // ── Pair Setup Card ───────────────────────────────────────────────────────────
-function PairCard({ settings, onSave }: { settings: PegSettings; onSave: (s: PegSettings) => Promise<void> }) {
+function PairCard({ settings, onSave, slot }: { settings: PegSettings; onSave: (s: PegSettings) => Promise<void>; slot: number }) {
   const [s, setS]         = useState(settings);
   const [open, setOpen]   = useState(false);
   const [resolving, setResolving] = useState(false);

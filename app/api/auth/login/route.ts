@@ -1,7 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ethers } from 'ethers';
+import { query } from '@/lib/db/client';
 
 export const runtime = 'nodejs';
+
+async function ensureAdminWalletsTable(): Promise<void> {
+  await query(`
+    CREATE TABLE IF NOT EXISTS admin_wallets (
+      id       SERIAL PRIMARY KEY,
+      address  TEXT UNIQUE NOT NULL,
+      added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `).catch(() => {});
+}
 
 export async function POST(req: NextRequest) {
   const { address, signature, timestamp } =
@@ -16,15 +27,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing address, signature, or timestamp' }, { status: 400 });
   }
 
-  // Reject if the signed timestamp is older than 2 minutes (prevents replay attacks)
   if (Math.abs(Date.now() - timestamp) > 120_000) {
     return NextResponse.json({ error: 'Signature expired — please try again' }, { status: 401 });
   }
 
-  // Reconstruct the exact message the client signed
   const message = `Sign in to PegBot\n\nTimestamp: ${timestamp}`;
 
-  // Recover the address from the signature — this is the cryptographic proof
   let recovered: string;
   try {
     recovered = ethers.verifyMessage(message, signature);
@@ -32,12 +40,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
   }
 
-  if (recovered.toLowerCase() !== adminAddress.toLowerCase()) {
-    return NextResponse.json({ error: 'Wallet is not the admin address' }, { status: 403 });
+  const recoveredLower = recovered.toLowerCase();
+  const isRootAdmin    = recoveredLower === adminAddress.toLowerCase();
+
+  let allowed = isRootAdmin;
+  if (!allowed) {
+    await ensureAdminWalletsTable();
+    const rows = await query(
+      'SELECT 1 FROM admin_wallets WHERE LOWER(address) = $1', [recoveredLower]
+    ).catch(() => []);
+    allowed = rows.length > 0;
   }
 
-  // Address verified — issue session cookie (httpOnly, never readable by JS)
-  const res = NextResponse.json({ ok: true });
+  if (!allowed) {
+    return NextResponse.json({ error: 'Wallet is not authorised as an admin' }, { status: 403 });
+  }
+
+  const res = NextResponse.json({ ok: true, isRootAdmin });
   res.cookies.set('__session', process.env.API_SECRET!, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',

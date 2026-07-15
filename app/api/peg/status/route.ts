@@ -1,29 +1,29 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { ethers } from 'ethers';
-import { pegMaintainer } from '@/lib/services/pegMaintainer';
-import { priceMonitor } from '@/lib/services/priceMonitor';
+import { getPegSlot } from '@/lib/services/pegMaintainer';
+import { getPriceMonitorSlot } from '@/lib/services/priceMonitor';
 import { getChainProvider, getChainSigner } from '@/lib/blockchain/provider';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
-  try {
-    const { chain, tokenAddress, stableAddress, pairAddress, cooldownSeconds, maxDailySpendUsd } = pegMaintainer.settings;
-    const { targetPeg, upperBand, lowerBand } = pegMaintainer.settings;
+export async function GET(req: NextRequest) {
+  const slot = Math.min(2, Math.max(0, Number(req.nextUrl.searchParams.get('slot') ?? 0)));
+  const peg  = getPegSlot(slot);
+  const mon  = getPriceMonitorSlot(slot);
 
-    // 1. Price snapshot
-    // • Bot RUNNING  → use the live in-memory snapshot (refreshed every 15 s by the monitor)
-    // • Bot STOPPED  → always do a fresh on-chain read so we never show a stale price
-    const botRunning = pegMaintainer.state !== 'STOPPED';
-    let snap = botRunning ? priceMonitor.getLastSnapshot() : null;
+  try {
+    const { chain, tokenAddress, stableAddress, pairAddress, cooldownSeconds, maxDailySpendUsd } = peg.settings;
+    const { targetPeg, upperBand, lowerBand } = peg.settings;
+
+    const botRunning = peg.state !== 'STOPPED';
+    let snap = botRunning ? mon.getLastSnapshot() : null;
     if (!snap && pairAddress && tokenAddress && stableAddress && chain !== 'solana') {
       try {
-        snap = await priceMonitor.getOnChainPrice({ chain, tokenAddress, stableAddress, pairAddress });
-      } catch { /* non-fatal — pair may not exist yet */ }
+        snap = await mon.getOnChainPrice({ chain, tokenAddress, stableAddress, pairAddress });
+      } catch { /* non-fatal */ }
     }
 
-    // 2. Bot wallet balances
     let botTokenBalance:  number | null = null;
     let botStableBalance: number | null = null;
     let botNativeBalance: number | null = null;
@@ -56,28 +56,23 @@ export async function GET() {
       } catch { /* non-fatal */ }
     }
 
-    // 3. Cooldown remaining
-    const lastTrade = pegMaintainer.lastTradeAt;
+    const lastTrade = peg.lastTradeAt;
     const cooldownRemaining = lastTrade
       ? Math.max(0, cooldownSeconds - (Date.now() - lastTrade.getTime()) / 1000)
       : 0;
 
-    // 4. Daily stats
-    const stats = await pegMaintainer.getDailyStats().catch(() => ({
-      totalTrades: 0, totalBuyUsd: 0, totalSellTokens: 0,
+    const stats = await peg.getDailyStats().catch(() => ({
+      totalTrades: 0, totalBuyUsd: 0, totalSellTokens: 0, volumeTrades: 0, volumeUsd: 0,
     }));
 
     return NextResponse.json({
-      state:         pegMaintainer.state,
+      slot,
+      state:         peg.state,
       chain,
-
-      // Price data (all from on-chain pair contract)
       currentPrice:  snap?.price        ?? null,
       targetPeg,
       upperBound:    targetPeg * (1 + upperBand),
       lowerBound:    targetPeg * (1 - lowerBand),
-
-      // Pool reserves (on-chain)
       tokenReserve:  snap?.tokenReserve  ?? null,
       stableReserve: snap?.stableReserve ?? null,
       liquidityUsd:  snap?.liquidityUsd  ?? null,
@@ -85,31 +80,23 @@ export async function GET() {
       stableSymbol,
       blockNumber:   snap?.blockNumber   ?? null,
       lastUpdated:   snap?.timestamp     ?? null,
-
-      // Bot wallet balances
       botTokenBalance,
       botStableBalance,
       botNativeBalance,
       nativeSymbol: chain === 'bsc' ? 'BNB' : 'ETH',
-
-      // Trading state
-      dailySpendUsd:    pegMaintainer.dailySpendUsd,
+      dailySpendUsd:    peg.dailySpendUsd,
       maxDailySpendUsd,
       cooldownRemaining,
-      lastTradeAt: pegMaintainer.lastTradeAt,
+      lastTradeAt: peg.lastTradeAt,
       dailyStats:  stats,
-
-      // CoinGecko market data
       marketPriceUsd: snap?.marketPriceUsd ?? null,
       cgChange24h:    snap?.cgChange24h    ?? null,
       cgVolume24h:    snap?.cgVolume24h    ?? null,
       cgMarketCap:    snap?.cgMarketCap    ?? null,
-
-      // Pool version and fee tier
       dexVersion:  snap?.dexVersion ?? 'unknown',
-      poolFeeTier: pegMaintainer.settings.poolFeeTier ?? 0,
-      volumeEnabled:         pegMaintainer.settings.volumeEnabled,
-      volumeIntervalSeconds: pegMaintainer.settings.volumeIntervalSeconds,
+      poolFeeTier: peg.settings.poolFeeTier ?? 0,
+      volumeEnabled:         peg.settings.volumeEnabled,
+      volumeIntervalSeconds: peg.settings.volumeIntervalSeconds,
     });
   } catch (e: unknown) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

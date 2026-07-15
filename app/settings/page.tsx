@@ -1,8 +1,8 @@
 'use client';
 import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { AlertTriangle, Loader2 } from 'lucide-react';
-import { getAppSettings, updateAppSettings } from '@/lib/api';
+import { AlertTriangle, Loader2, Plus, Trash2, ShieldCheck } from 'lucide-react';
+import { getAppSettings, updateAppSettings, getAdminWallets, addAdminWallet, removeAdminWallet } from '@/lib/api';
 import clsx from 'clsx';
 
 interface AppSettings {
@@ -10,11 +10,22 @@ interface AppSettings {
   solanaNetwork: 'mainnet-beta' | 'devnet';
 }
 
-export default function SettingsPage() {
-  const [settings, setSetting] = useState<AppSettings | null>(null);
-  const [saving,   setSaving]  = useState(false);
+interface AdminWallet { address: string; addedAt: string }
+interface AdminWalletsData { root: string; wallets: AdminWallet[] }
 
-  useEffect(() => { getAppSettings().then(setSetting).catch(() => {}); }, []);
+export default function SettingsPage() {
+  const [settings, setSetting]   = useState<AppSettings | null>(null);
+  const [saving,   setSaving]    = useState(false);
+
+  const [admins,       setAdmins]      = useState<AdminWalletsData | null>(null);
+  const [newAddr,      setNewAddr]     = useState('');
+  const [addingAdmin,  setAddingAdmin] = useState(false);
+  const [removingAddr, setRemoving]    = useState<string | null>(null);
+
+  useEffect(() => {
+    getAppSettings().then(setSetting).catch(() => {});
+    getAdminWallets().then(setAdmins).catch(() => {});
+  }, []);
 
   async function toggle(key: keyof AppSettings, value: string) {
     if (!settings || saving) return;
@@ -24,6 +35,29 @@ export default function SettingsPage() {
       setSetting(updated);
     } catch (e: unknown) { toast.error((e as Error).message); }
     setSaving(false);
+  }
+
+  async function handleAddAdmin() {
+    const addr = newAddr.trim();
+    if (!addr) return;
+    setAddingAdmin(true);
+    try {
+      await addAdminWallet(addr);
+      setAdmins(await getAdminWallets());
+      setNewAddr('');
+      toast.success('Admin wallet added');
+    } catch (e: unknown) { toast.error((e as Error).message); }
+    setAddingAdmin(false);
+  }
+
+  async function handleRemoveAdmin(address: string) {
+    setRemoving(address);
+    try {
+      await removeAdminWallet(address);
+      setAdmins(await getAdminWallets());
+      toast.success('Admin wallet removed');
+    } catch (e: unknown) { toast.error((e as Error).message); }
+    setRemoving(null);
   }
 
   if (!settings) return (
@@ -81,6 +115,72 @@ export default function SettingsPage() {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* ── Admin Wallets ─────────────────────────────────── */}
+      <h1 className="text-xl font-bold text-zinc-50 pt-2">Admin Wallets</h1>
+      <p className="text-xs text-zinc-500 -mt-2">
+        Additional wallets that can log in and control the bot. The root admin
+        (<code className="text-zinc-400 font-mono">ADMIN_ADDRESS</code> env var) is always allowed and cannot be removed.
+      </p>
+
+      <div className="card space-y-3">
+        {/* Root admin */}
+        {admins?.root && (
+          <div className="flex items-center gap-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2.5">
+            <ShieldCheck className="h-4 w-4 text-brand-400 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-brand-400 font-medium">Root Admin</p>
+              <p className="text-xs font-mono text-zinc-300 truncate">{admins.root}</p>
+            </div>
+            <span className="text-xs text-zinc-600 shrink-0">permanent</span>
+          </div>
+        )}
+
+        {admins === null && (
+          <div className="flex items-center justify-center py-4">
+            <Loader2 className="h-4 w-4 animate-spin text-zinc-600" />
+          </div>
+        )}
+
+        {admins?.wallets.length === 0 && (
+          <p className="text-xs text-zinc-600 text-center py-2">No additional admins added yet</p>
+        )}
+
+        {admins?.wallets.map(w => (
+          <div key={w.address} className="flex items-center gap-3 rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-zinc-200 truncate">{w.address}</p>
+              <p className="text-xs text-zinc-600 mt-0.5">Added {new Date(w.addedAt).toLocaleDateString()}</p>
+            </div>
+            <button
+              onClick={() => void handleRemoveAdmin(w.address)}
+              disabled={removingAddr === w.address}
+              className="text-zinc-600 hover:text-red-400 transition-colors disabled:opacity-40 p-1">
+              {removingAddr === w.address
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                : <Trash2 className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+        ))}
+
+        {/* Add new admin */}
+        <div className="flex gap-2 pt-1 border-t border-zinc-800/60">
+          <input
+            className="input flex-1 font-mono text-xs"
+            placeholder="0x… EVM wallet address"
+            value={newAddr}
+            onChange={e => setNewAddr(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void handleAddAdmin(); }}
+          />
+          <button
+            onClick={() => void handleAddAdmin()}
+            disabled={addingAdmin || !newAddr.trim()}
+            className="btn-primary px-3 disabled:opacity-40 flex items-center gap-1.5 text-sm">
+            {addingAdmin ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            Add
+          </button>
         </div>
       </div>
 

@@ -1,16 +1,15 @@
 import { NextRequest } from 'next/server';
-import { pegMaintainer } from '@/lib/services/pegMaintainer';
-import { priceMonitor } from '@/lib/services/priceMonitor';
+import { getPegSlot } from '@/lib/services/pegMaintainer';
+import { getPriceMonitorSlot } from '@/lib/services/priceMonitor';
 import { bulkSender } from '@/lib/services/bulkSender';
 import { solanaBulkSender } from '@/lib/services/solanaBulkSender';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: NextRequest) {
-  // Auth handled by middleware (checks __session cookie).
-  // EventSource sends cookies automatically — no extra check needed here.
+const SLOTS = [0, 1, 2] as const;
 
+export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
   let closed = false;
 
@@ -23,22 +22,43 @@ export async function GET(req: NextRequest) {
         } catch { /* stream closed */ }
       };
 
-      // Heartbeat — keeps connection alive through proxies
       const heartbeat = setInterval(() => {
         if (closed) { clearInterval(heartbeat); return; }
         try { controller.enqueue(encoder.encode(': ping\n\n')); } catch { /* closed */ }
       }, 20_000);
 
-      // Send current state immediately on connect
-      const snap = priceMonitor.getLastSnapshot();
-      if (snap) send('PRICE_UPDATE', snap);
-      send('BOT_STATE', { state: pegMaintainer.state, settings: pegMaintainer.settings });
+      // Send current state for all slots on connect
+      for (const slot of SLOTS) {
+        const snap = getPriceMonitorSlot(slot).getLastSnapshot();
+        const peg  = getPegSlot(slot);
+        if (snap) send('PRICE_UPDATE', { slot, ...snap });
+        send('BOT_STATE', { slot, state: peg.state, settings: peg.settings });
+      }
 
-      // Peg events
-      const onPrice       = (d: unknown) => send('PRICE_UPDATE', d);
-      const onState       = (d: unknown) => send('BOT_STATE', { state: d, settings: pegMaintainer.settings });
-      const onTrade       = (d: unknown) => send('TRADE', d);
-      const onPegCheck    = (d: unknown) => send('PEG_CHECK', d);
+      // Per-slot peg event listeners
+      const slotCleanups: (() => void)[] = [];
+
+      for (const slot of SLOTS) {
+        const mon = getPriceMonitorSlot(slot);
+        const peg = getPegSlot(slot);
+
+        const onPrice    = (d: unknown) => send('PRICE_UPDATE', { slot, ...(d as object) });
+        const onState    = (d: unknown) => send('BOT_STATE',   { slot, state: d, settings: peg.settings });
+        const onTrade    = (d: unknown) => send('TRADE',       { slot, ...(d as object) });
+        const onPegCheck = (d: unknown) => send('PEG_CHECK',   { slot, ...(d as object) });
+
+        mon.on('price',        onPrice);
+        peg.on('stateChange',  onState);
+        peg.on('trade',        onTrade);
+        peg.on('priceUpdate',  onPegCheck);
+
+        slotCleanups.push(() => {
+          mon.removeListener('price',        onPrice);
+          peg.removeListener('stateChange',  onState);
+          peg.removeListener('trade',        onTrade);
+          peg.removeListener('priceUpdate',  onPegCheck);
+        });
+      }
 
       // BNB Bulk events
       const onJobStart    = (d: unknown) => send('BULK_JOB_START', d);
@@ -56,10 +76,6 @@ export async function GET(req: NextRequest) {
       const onSolBatchOk     = (d: unknown) => send('SOL_BATCH_CONFIRMED', d);
       const onSolBatchFail   = (d: unknown) => send('SOL_BATCH_FAILED', d);
 
-      priceMonitor.on('price',        onPrice);
-      pegMaintainer.on('stateChange', onState);
-      pegMaintainer.on('trade',       onTrade);
-      pegMaintainer.on('priceUpdate', onPegCheck);
       bulkSender.on('jobStart',       onJobStart);
       bulkSender.on('jobComplete',    onJobComplete);
       bulkSender.on('jobFailed',      onJobFailed);
@@ -73,14 +89,10 @@ export async function GET(req: NextRequest) {
       solanaBulkSender.on('batchConfirmed', onSolBatchOk);
       solanaBulkSender.on('batchFailed',    onSolBatchFail);
 
-      // Clean up when the browser disconnects
       req.signal.addEventListener('abort', () => {
         closed = true;
         clearInterval(heartbeat);
-        priceMonitor.removeListener('price',        onPrice);
-        pegMaintainer.removeListener('stateChange', onState);
-        pegMaintainer.removeListener('trade',       onTrade);
-        pegMaintainer.removeListener('priceUpdate', onPegCheck);
+        slotCleanups.forEach(fn => fn());
         bulkSender.removeListener('jobStart',       onJobStart);
         bulkSender.removeListener('jobComplete',    onJobComplete);
         bulkSender.removeListener('jobFailed',      onJobFailed);
@@ -103,7 +115,7 @@ export async function GET(req: NextRequest) {
       'Content-Type':  'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       'Connection':    'keep-alive',
-      'X-Accel-Buffering': 'no', // disable nginx buffering
+      'X-Accel-Buffering': 'no',
     },
   });
 }
